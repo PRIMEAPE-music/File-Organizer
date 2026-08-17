@@ -1,6 +1,7 @@
 import * as repo from '../db/repositories/reminders.repo'
 import { getTaskById } from '../db/repositories/tasks.repo'
 import { dueDateToInstant, formatByWeekday } from '../utils/recurrence'
+import { sanitizeReminderSound } from '../../shared/reminder-sounds'
 import { getAppPrefs } from './app-prefs.service'
 import type {
   Reminder,
@@ -82,6 +83,9 @@ import type {
 
 const MINUTE_MS = 60_000
 
+/** How far past `now` the near-due clamp aims: soon, but not already overdue. */
+const CLAMP_OFFSET_MS = 1_000
+
 const PRIORITY_RANK: Record<TaskPriority, number> = {
   low: 0,
   medium: 1,
@@ -103,10 +107,22 @@ export interface AutoFireAtPlan {
   /**
    * True when `at` came from the near-due clamp — i.e. it is derived from `now`
    * rather than from the task's due date, and so is a DIFFERENT INSTANT on every
-   * recompute. `syncTaskAutoReminder` is the only thing that needs to know, and it
-   * needs to know because a value that never repeats cannot be reconciled towards.
+   * recompute. `stickyFireAt` is the only thing that needs to know, and it needs to
+   * know because a value that never repeats cannot be reconciled towards.
    */
   clamped: boolean
+}
+
+/**
+ * The near-due clamp's instant: fire now-ish rather than never.
+ *
+ * The one output of the planning below that is a function of `now` rather than of the
+ * task, and therefore the only one that moves on a recompute. Named and shared by
+ * both the automatic and the manual path so that "clamped" means exactly one thing in
+ * this file, and so `stickyFireAt` is the only place that has to cope with it.
+ */
+function clampToNow(nowMs: number): AutoFireAtPlan {
+  return { at: new Date(nowMs + CLAMP_OFFSET_MS), clamped: true }
 }
 
 /**
@@ -139,17 +155,43 @@ export function planAutoFireAt(
   const ideal = new Date(due.getTime() - Math.max(0, leadMinutes) * 60_000)
   // The due date is in the future but the lead time overshoots into the past:
   // fire now-ish rather than never, since the task genuinely is nearly due.
-  if (ideal.getTime() <= nowMs) return { at: new Date(nowMs + 1_000), clamped: true }
+  if (ideal.getTime() <= nowMs) return clampToNow(nowMs)
   return { at: ideal, clamped: false }
 }
 
-/** `planAutoFireAt` without the clamp flag, for callers that only want the time. */
-export function computeAutoFireAt(
-  dueDate: string | null,
-  leadMinutes: number,
-  nowMs: number = Date.now()
-): Date | null {
-  return planAutoFireAt(dueDate, leadMinutes, nowMs)?.at ?? null
+/**
+ * The `fire_at` to write — WITH THE CLAMP MADE STICKY.
+ *
+ * Used by both reminder paths a task drives, because both recompute on every save of
+ * the task and both would otherwise re-alert forever. `plan.at` is a stable function
+ * of the task in every case but one: the clamp resolves to `now + 1s`, a different
+ * instant each time, and writing it deletes the pending occurrence, materialises a
+ * fresh one and fires again — for every single save, for as long as the task stays
+ * inside its lead window (or, on the manual path, for as long as it stays past due,
+ * which needs no lead time at all).
+ *
+ * THE RULE: the clamp may move `fire_at` forward only while the reminder has not yet
+ * delivered the firing it is currently holding. Once the user has been told for this
+ * `fire_at`, telling them again because they saved the task adds nothing.
+ *
+ * Keyed on the row's CURRENT `fire_at` rather than on "has this reminder ever fired":
+ * a firing delivered for an earlier time says nothing about the one now scheduled.
+ * `hasDeliveredOccurrenceAtOrAfter` also counts a snooze as delivered — see its own
+ * note; moving `fire_at` would delete the snoozed row and lose the deferral.
+ *
+ * `existing` is undefined for a row about to be created, or one whose history does not
+ * belong to this reminder yet. It has nothing to have delivered, so the clamp applies
+ * in full — which is what keeps a first, explicit "remind me now-ish" working.
+ */
+function stickyFireAt(existing: Reminder | undefined, plan: AutoFireAtPlan): string {
+  if (
+    existing &&
+    plan.clamped &&
+    repo.hasDeliveredOccurrenceAtOrAfter(existing.id, existing.fire_at)
+  ) {
+    return existing.fire_at
+  }
+  return plan.at.toISOString()
 }
 
 export interface AutoReminderOutcome {
@@ -226,17 +268,10 @@ export function syncTaskAutoReminder(
     return { action: dupesRemoved > 0 ? 'updated' : 'none', reminderId: null }
   }
 
-  // THE IDEMPOTENCY GUARD (see the note above). `plan.at` is stable for every case
-  // except the clamp, and the clamp is only allowed to move a reminder that has not
-  // yet said its piece: keeping the existing time means the comparison below writes
-  // nothing, so the pending occurrence survives and no second alert is produced.
-  // Deliberately keyed on the row's CURRENT `fire_at` rather than on "has this
-  // reminder ever fired": a firing delivered for an earlier time says nothing about
-  // the one now scheduled.
-  const targetFireAt =
-    existing && plan.clamped && repo.hasDeliveredOccurrenceAtOrAfter(existing.id, existing.fire_at)
-      ? existing.fire_at
-      : plan.at.toISOString()
+  // THE IDEMPOTENCY GUARD (see the note above, and `stickyFireAt` itself). Keeping
+  // the existing time means the comparison below writes nothing, so the pending
+  // occurrence survives and no second alert is produced.
+  const targetFireAt = stickyFireAt(existing, plan)
 
   if (existing) {
     // THE NARROW WRITE. `fire_at` and `enabled` are the only columns the automation
@@ -307,7 +342,7 @@ export function syncTaskAutoReminder(
  *
  * `fire_at` is compared AT MINUTE GRANULARITY. The editor is a `datetime-local`
  * input, which cannot express seconds, so it round-trips a stored
- * `…T14:23:47.512Z` (which the near-due clamp in `computeAutoFireAt` produces) back
+ * `…T14:23:47.512Z` (which the near-due clamp in `clampToNow` produces) back
  * as `…T14:23:00.000Z`. Comparing exact instants would read that truncation as a
  * deliberate time change and detach a reminder the user only re-tiered — the bug,
  * in miniature. A real edit moves the time by at least a minute and is still seen.
@@ -441,6 +476,28 @@ export function removeTaskAutoReminder(taskId: number): number {
  * decision, and timing is what detaches. "Reset to automatic" in the Reminders tab
  * hands it back.
  *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * THIS RUNS ON EVERY SAVE OF THE TASK, not only when the box is touched, so it has
+ * to be idempotent for the same two reasons `syncTaskAutoReminder` does — and it was
+ * the easier of the two to hit, because it needs no lead time at all: a task already
+ * past due sits inside the clamp permanently.
+ *
+ *  - THE CLAMP IS STICKY, via the same `stickyFireAt` the automation uses. An
+ *    explicit opt-in on an already-due task still fires once, promptly; it does not
+ *    fire again on every later save. Measured before the fix: 4 saves → 4 firings, 4
+ *    distinct `fire_at`, 4 delivered occurrence rows.
+ *  - THE WRITE IS CONDITIONAL. `updateReminder` deletes every pending AND SNOOZED
+ *    occurrence and bumps `updated_at`, so calling it unconditionally meant saving a
+ *    task silently cancelled a snooze the user had just set on that task's reminder
+ *    — and with `fire_at` already past, re-materialisation put nothing back, so the
+ *    deferred firing was lost outright rather than merely moved. Nothing is written
+ *    when nothing would change; see `wouldChangeManualReminder`.
+ *
+ * There is deliberately NO "due date already past → no reminder" guard here, which
+ * is what separates this from the automation. The opt-in is the user overriding that
+ * judgement, and the stickiness is what makes honouring it survivable.
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
  * @param enabled false removes the manual reminder (and only the manual one).
  */
 export function setTaskManualReminder(
@@ -465,18 +522,32 @@ export function setTaskManualReminder(
     return { ok: false, message: 'Give the task a due date first.', reminderId: existing?.id ?? null }
   }
 
-  const lead = Math.max(0, Math.round(leadMinutes))
-  let fireAt = new Date(due.getTime() - lead * 60_000)
-  // Unlike the automation, an explicit opt-in on an already-due task is honoured:
-  // the user asked for it. It fires on the next tick as a normal (not missed)
-  // firing.
-  if (fireAt.getTime() <= nowMs) fireAt = new Date(nowMs + 1_000)
+  // Normalised to exactly what the database will store, so the comparison below
+  // cannot mistake a value the write path would have coerced for a change — and so a
+  // non-finite lead arriving over IPC cannot make this path permanently un-idempotent
+  // (`updateReminder` stores 0 for one; `Math.round(NaN)` would have compared unequal
+  // to it forever).
+  const lead = Number.isFinite(leadMinutes) ? Math.max(0, Math.round(leadMinutes)) : 0
+
+  // `planAutoFireAt` returns null here only for a due date already past — the
+  // unparseable case was rejected above — and that is precisely the case the manual
+  // path does NOT decline: an explicit opt-in is honoured, clamped to now-ish, exactly
+  // as an overshooting lead time is. Reusing the planner keeps one definition of the
+  // clamp, and of the `clamped` flag the stickiness depends on.
+  const plan = planAutoFireAt(task.due_date, lead, nowMs) ?? clampToNow(nowMs)
+
+  // Sticky against `manual`, not `existing`: adopting an AUTOMATIC reminder here is
+  // the first time this opt-in has been honoured, and it gets its one prompt firing
+  // even though the automation's own earlier firings are in that row's history. From
+  // then on the row IS the manual reminder, and every later save of the task finds
+  // its firing delivered and leaves `fire_at` alone.
+  const fireAt = stickyFireAt(manual, plan)
 
   const prefs = getAppPrefs()
   const input: ReminderInput = {
     title: `Task due: ${task.title}`,
     body: null,
-    fire_at: fireAt.toISOString(),
+    fire_at: fireAt,
     freq: null,
     interval: 1,
     byweekday: null,
@@ -489,6 +560,13 @@ export function setTaskManualReminder(
   }
 
   if (existing) {
+    // NOTHING AT ALL when nothing would change — no UPDATE, no occurrence deletion,
+    // no `updated_at` bump, so a snooze on this reminder survives the task being
+    // saved. This lives in main rather than in the renderer on purpose: the renderer
+    // declining to call is defence in depth, this is the guarantee.
+    if (!wouldChangeManualReminder(existing, input)) {
+      return { ok: true, reminderId: existing.id }
+    }
     // takeOwnership: for the hand-made row this is already true and costs nothing;
     // for an adopted automatic one it is the point of the call.
     repo.updateReminder(existing.id, input, { takeOwnership: true })
@@ -497,6 +575,44 @@ export function setTaskManualReminder(
   }
   const created = repo.createReminder(input, { autoCreated: false })
   return { ok: true, reminderId: created.id }
+}
+
+/**
+ * Would `updateReminder(current.id, input, { takeOwnership: true })` change anything
+ * the database holds?
+ *
+ * `false` is a licence to skip the write entirely, which matters because the write is
+ * not free: it discards the reminder's pending and snoozed occurrences. See the note
+ * on `setTaskManualReminder`.
+ *
+ * COUPLED, ON PURPOSE, TO `updateReminder`'s COLUMN LIST. Every column that UPDATE
+ * names is compared here, plus the two the caller controls around it: `auto_created`,
+ * which `takeOwnership` forces to 0, and `enabled`, which the caller re-arms
+ * separately — so a disabled row must never be reported as up to date. A column added
+ * to the write and not to this comparison would make a real edit vanish, which is why
+ * the two lists are worth reading side by side.
+ *
+ * The coercions are the write path's own helpers rather than re-implementations, the
+ * same reasoning as `editDetachesFromTask`. `interval` and `lead_time_min` need none:
+ * the caller builds them already in stored form.
+ */
+function wouldChangeManualReminder(current: Reminder, input: ReminderInput): boolean {
+  return !(
+    current.auto_created === 0 &&
+    current.enabled === 1 &&
+    current.title === input.title &&
+    current.body === (input.body ?? null) &&
+    current.entity_type === (input.entity_type ?? null) &&
+    current.entity_id === (input.entity_id ?? null) &&
+    current.fire_at === input.fire_at &&
+    current.freq === (input.freq ?? null) &&
+    current.interval === input.interval &&
+    current.byweekday === formatByWeekday(input.byweekday) &&
+    current.lead_time_min === input.lead_time_min &&
+    current.intensity === input.intensity &&
+    current.escalate_after_min === (input.escalate_after_min ?? null) &&
+    current.sound === sanitizeReminderSound(input.sound)
+  )
 }
 
 export function getTaskManualReminder(taskId: number) {

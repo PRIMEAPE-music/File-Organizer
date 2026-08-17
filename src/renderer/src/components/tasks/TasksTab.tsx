@@ -58,6 +58,7 @@ export default function TasksTab({ sidebarCollapsed = false }: TasksTabProps) {
     tagIds: number[]
     remindMe: boolean
     remindLeadMin: number
+    remindChanged: boolean
   }) => {
     if (taskModal?.mode === 'edit') {
       const task = taskModal.task
@@ -80,8 +81,16 @@ export default function TasksTab({ sidebarCollapsed = false }: TasksTabProps) {
         if (!newTagIds.has(tagId)) await removeTaskTag(task.id, tagId)
       }
 
-      // After the task write, so the reminder is derived from the saved due date.
-      await window.api.setTaskReminder(updated.id, data.remindMe, data.remindLeadMin)
+      // After the task write, so the reminder is derived from the saved due date —
+      // and ONLY when something about the reminder changed. This ran on every save,
+      // which rewrote the reminder every time: a `fire_at` clamped to "now" moved
+      // again and re-fired, and the row's pending and snoozed occurrences were
+      // discarded, so saving a task silently cancelled a snooze. `setTaskManualReminder`
+      // now declines a write that would change nothing — that is the guarantee, and
+      // this is defence in depth. See TaskModal for how `remindChanged` is decided.
+      if (data.remindChanged) {
+        await window.api.setTaskReminder(updated.id, data.remindMe, data.remindLeadMin)
+      }
     } else {
       const created = await createTask({
         title: data.title,

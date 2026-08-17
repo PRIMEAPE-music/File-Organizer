@@ -19,6 +19,12 @@ interface Props {
     /** "Remind me" — always a hand-made (auto_created = 0) reminder. */
     remindMe: boolean
     remindLeadMin: number
+    /**
+     * Whether anything the manual reminder is derived from actually changed in this
+     * edit. False means the parent should not touch the reminder at all — see the
+     * note where it is computed.
+     */
+    remindChanged: boolean
   }) => void | Promise<void>
   onClose: () => void
 }
@@ -51,6 +57,12 @@ export default function TaskModal({ task, categories, tags, onSave, onClose }: P
   const [remindMe, setRemindMe] = useState(false)
   const [remindLeadMin, setRemindLeadMin] = useState('0')
   const [hasAutoReminder, setHasAutoReminder] = useState(false)
+  /**
+   * The reminder controls as they stood when the modal finished loading, so the save
+   * can tell a real change from a plain re-save. Null until the load resolves — and
+   * until it does, the user cannot have changed a control they have not been shown.
+   */
+  const [loadedRemind, setLoadedRemind] = useState<{ on: boolean; leadMin: number } | null>(null)
 
   // The modal is closed by the parent only after its save resolves, so without
   // this a double-click on Create created the task twice.
@@ -64,6 +76,7 @@ export default function TaskModal({ task, categories, tags, onSave, onClose }: P
       setRemindMe(manual !== null)
       if (manual) setRemindLeadMin(String(manual.lead_time_min))
       setHasAutoReminder(auto !== null)
+      setLoadedRemind({ on: manual !== null, leadMin: manual ? manual.lead_time_min : 0 })
     })
     return () => {
       cancelled = true
@@ -82,17 +95,45 @@ export default function TaskModal({ task, categories, tags, onSave, onClose }: P
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     if (!title.trim()) return
+    const cleanTitle = title.trim()
+    const cleanDueDate = dueDate || null
+    const cleanLead = Math.max(0, Number(remindLeadMin) || 0)
+
+    /**
+     * DID ANYTHING ABOUT THE MANUAL REMINDER ACTUALLY CHANGE?
+     *
+     * The parent used to call `setTaskReminder` after every edit-mode save, because
+     * `remindMe` is initialised from the existing reminder and so stays ticked. Every
+     * one of those calls rewrote the row: it moved a `fire_at` that had been clamped
+     * to "now" (re-firing the alert), and it discarded the reminder's pending and
+     * snoozed occurrences (losing a snooze). Main declines a write that would change
+     * nothing, which is the real guarantee — this just stops asking.
+     *
+     * The reminder is derived from four things, so all four are compared: the tick,
+     * the lead time, and the task's own due date and title (the reminder is called
+     * "Task due: <title>" and fires at due − lead). Before the load resolves there is
+     * nothing the user can have changed.
+     */
+    const remindChanged =
+      loadedRemind !== null &&
+      (remindMe !== loadedRemind.on ||
+        (remindMe &&
+          (cleanLead !== loadedRemind.leadMin ||
+            cleanDueDate !== (task?.due_date ?? null) ||
+            cleanTitle !== (task?.title ?? ''))))
+
     runSave(() =>
       onSave({
-        title: title.trim(),
+        title: cleanTitle,
         description,
         status,
         priority,
-        due_date: dueDate || null,
+        due_date: cleanDueDate,
         category_id: categoryId,
         tagIds: Array.from(selectedTagIds),
         remindMe,
-        remindLeadMin: Math.max(0, Number(remindLeadMin) || 0)
+        remindLeadMin: cleanLead,
+        remindChanged
       })
     )
   }
