@@ -29,6 +29,7 @@ import type {
   ReminderAlertPayload,
   ReminderInput,
   ReminderIntensity,
+  ReminderResetResult,
   ReminderSnoozeChoice,
   ReminderWithMeta
 } from '../shared/types'
@@ -185,6 +186,9 @@ const api = {
     ipcRenderer.invoke(IPC.DELETE_REMINDER, id),
   setReminderEnabled: (id: number, enabled: boolean): Promise<ReminderWithMeta | undefined> =>
     ipcRenderer.invoke(IPC.SET_REMINDER_ENABLED, id, enabled),
+  /** Make a reminder follow its task's due date again, after a timing edit detached it. */
+  resetReminderToAuto: (id: number): Promise<ReminderResetResult> =>
+    ipcRenderer.invoke(IPC.RESET_REMINDER_TO_AUTO, id),
   snoozeOccurrence: (occurrenceId: number, choice: ReminderSnoozeChoice): Promise<void> =>
     ipcRenderer.invoke(IPC.SNOOZE_OCCURRENCE, occurrenceId, choice),
   dismissOccurrence: (occurrenceId: number): Promise<void> =>

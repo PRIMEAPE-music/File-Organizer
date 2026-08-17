@@ -3,8 +3,10 @@ import { IPC } from '../../shared/ipc-channels'
 import * as remindersRepo from '../db/repositories/reminders.repo'
 import * as reminderService from '../services/reminder.service'
 import {
+  editDetachesFromTask,
   getTaskAutoReminder,
   getTaskManualReminder,
+  resetTaskReminderToAutomatic,
   setTaskManualReminder
 } from '../services/task-reminder.service'
 import type {
@@ -12,6 +14,7 @@ import type {
   ReminderAlertPayload,
   ReminderInput,
   ReminderIntensity,
+  ReminderResetResult,
   ReminderSnoozeChoice,
   ReminderWithMeta,
   Task
@@ -36,15 +39,28 @@ export function registerReminderHandlers(): void {
   })
 
   ipcMain.handle(IPC.UPDATE_REMINDER, (_e, id: number, input: ReminderInput) => {
-    // An edit from the Reminders tab is a person editing a reminder, so it takes
-    // ownership: `auto_created` is cleared and the task automation stops rewriting
-    // the row from preference defaults. The entity link stays, so the reminder still
-    // names the task it belongs to. Without this, switching a task reminder to
-    // blackout with a custom escalation was silently reverted the next time that
-    // task was saved.
-    const updated = remindersRepo.updateReminder(id, input, { takeOwnership: true })
+    // THE TASK OWNS *WHEN*, THE USER OWNS *HOW*. An edit from the Reminders tab used
+    // to detach the reminder from its task unconditionally, so changing only the
+    // tier silently stopped the task's due date from ever moving it again — with
+    // nothing in the UI to say the link was gone.
+    //
+    // Now only a timing edit detaches, and the decision is made by comparing what
+    // was submitted against the stored row rather than trusting anything the
+    // renderer says about its own intent. See `editDetachesFromTask`.
+    const current = remindersRepo.getRawReminder(id)
+    const detaches = current ? editDetachesFromTask(current, input) : false
+    const updated = remindersRepo.updateReminder(id, input, { takeOwnership: detaches })
     reminderService.rescheduleNow()
     return updated
+  })
+
+  ipcMain.handle(IPC.RESET_REMINDER_TO_AUTO, (_e, id: number): ReminderResetResult => {
+    // The way back from a timing edit. Without it a detach is a one-way door, and a
+    // reminder that has quietly stopped following its task is exactly the state the
+    // user got stuck in before.
+    const result = resetTaskReminderToAutomatic(id)
+    reminderService.rescheduleNow()
+    return result
   })
 
   ipcMain.handle(IPC.DELETE_REMINDER, (_e, id: number): void => {

@@ -287,17 +287,23 @@ export function createReminder(
  * are history, and deleting them would let an already-delivered firing come back
  * as a "missed" alert the next time the horizon was topped up.
  *
- * @param opts.takeOwnership Clear `auto_created`, making this the user's reminder.
- *   Set by every edit that came from a person (the Reminders tab, the task modal's
- *   "Remind me"), and never by the priority automation.
+ * @param opts.takeOwnership Clear `auto_created`, detaching the row from the task
+ *   automation for good.
  *
- *   WHY: the automation rewrites the auto reminder it owns from preference
- *   defaults every time the task is saved. Without this, a user who switched their
- *   task reminder to blackout with a 2-minute escalation found it silently back at
- *   toast the next time they touched the task — the edit was accepted, kept, and
- *   then quietly reverted. Taking ownership keeps the entity link (so the reminder
- *   still says which task it is about) while putting the row outside the
- *   automation's reach.
+ *   THIS IS NO LONGER SET BY EVERY HUMAN EDIT, and that was the bug the user hit
+ *   on first real use. A reminder created from a task's priority, then edited in
+ *   the Reminders tab — even only to change its tier — was fully detached, so the
+ *   task's due date silently stopped moving it and nothing in the UI said so.
+ *
+ *   The rule now: THE TASK OWNS *WHEN*, THE USER OWNS *HOW*. Only an edit to an
+ *   absolute time or a recurrence (`fire_at`, `freq`, `interval`, `byweekday`)
+ *   detaches, because that is the user asking for their own schedule. Style and
+ *   config edits (tier, escalation, sound, body, title, lead time) keep the link,
+ *   and the automation no longer overwrites them — see
+ *   `editDetachesFromTask` and `syncTaskAutoReminder` in task-reminder.service.
+ *
+ *   Still set unconditionally by the task modal's "Remind me", where an explicit
+ *   opt-in genuinely is the user taking the row over.
  */
 export function updateReminder(
   id: number,
@@ -373,6 +379,91 @@ export function setReminderEnabled(id: number, enabled: boolean): ReminderWithMe
 
   if (enabled) materialiseOccurrences(id)
   return getReminderById(id)
+}
+
+/**
+ * Move an auto reminder's firing time — the ONLY column, besides `enabled`, that
+ * the task automation may write after the row exists.
+ *
+ * This replaces the automation's old `updateReminder(existing.id, input)` call,
+ * which rewrote the whole row from preference defaults on every task save. That
+ * is why the previous build had to detach a reminder the moment anyone edited it:
+ * the alternative was watching the user's tier, escalation, sound and lead time
+ * silently revert. Narrowing the write is what makes keeping the link safe.
+ *
+ * `auto_created = 1` in the WHERE clause is the guard, not decoration: it makes it
+ * impossible for this to move a reminder the user has taken over, whatever the
+ * caller believes.
+ *
+ * `updated_at` is bumped so the new time travels over sync — the whole point of a
+ * reminder that follows its task is that both machines follow it.
+ *
+ * Returns false when nothing was written (no such row, or not the automation's).
+ */
+export function setAutoReminderFireAt(id: number, fireAtIso: string): boolean {
+  const db = getDb()
+  let changed = false
+  const apply = db.transaction(() => {
+    const info = db
+      .prepare(
+        `UPDATE reminders SET fire_at = ?, updated_at = ${NOW_EXPR}
+         WHERE id = ? AND auto_created = 1`
+      )
+      .run(fireAtIso, id)
+    changed = info.changes === 1
+    if (!changed) return
+    // Same rule as updateReminder: only the unfired future is re-derived.
+    db.prepare(
+      "DELETE FROM reminder_occurrences WHERE reminder_id = ? AND state IN ('pending', 'snoozed')"
+    ).run(id)
+  })
+  apply()
+
+  // A no-op while the row is disabled (materialiseOccurrences checks `enabled`),
+  // which is why callers re-enable *after* setting the time, not before.
+  if (changed) materialiseOccurrences(id)
+  return changed
+}
+
+/**
+ * Hand a detached, task-linked reminder back to the automation — "Reset to
+ * automatic" in the Reminders tab.
+ *
+ * The recurrence is cleared as part of the reset, deliberately. An auto reminder
+ * is a one-off anchored to a deadline (the automation only ever computes a single
+ * instant), and adding a recurrence is precisely one of the edits that detaches a
+ * reminder in the first place. Leaving `freq = 'daily'` on a row that has been
+ * handed back would produce a reminder the automation could re-anchor but never
+ * stop — it writes `fire_at` and `enabled`, nothing else.
+ *
+ * Restricted to rows with a task link: there is nothing for a standalone reminder
+ * to follow, and `auto_created = 1` with no entity would be a row the automation
+ * can never reconcile.
+ *
+ * The caller is expected to reconcile immediately afterwards
+ * (`syncTaskAutoReminder`), which is what recomputes `fire_at` from the task.
+ */
+export function adoptReminderAsAutomatic(id: number): boolean {
+  const db = getDb()
+  let changed = false
+  const apply = db.transaction(() => {
+    const info = db
+      .prepare(
+        `UPDATE reminders SET auto_created = 1, freq = NULL, interval = 1, byweekday = NULL,
+                updated_at = ${NOW_EXPR}
+         WHERE id = ? AND entity_type = 'task' AND entity_id IS NOT NULL`
+      )
+      .run(id)
+    changed = info.changes === 1
+    if (!changed) return
+    db.prepare(
+      "DELETE FROM reminder_occurrences WHERE reminder_id = ? AND state IN ('pending', 'snoozed')"
+    ).run(id)
+  })
+  apply()
+
+  if (changed) materialiseOccurrences(id)
+  return changed
 }
 
 // ─── Occurrence queries ───────────────────────────────────────────────────────

@@ -99,6 +99,13 @@ export default function ReminderModal({ reminder, prefs, onSave, onClose }: Prop
   const [leadTime, setLeadTime] = useState(String(reminder?.lead_time_min ?? 0))
   const [sound, setSound] = useState(reminder?.sound ?? '')
   const [error, setError] = useState<string | null>(null)
+  /**
+   * This reminder currently follows its task's due date. Changing the time or the
+   * repeat is what detaches it (see `editDetachesFromTask` in the main process), so
+   * say so at the moment of the decision — the user who hit this had no way to know
+   * the link had gone.
+   */
+  const followsTask = reminder?.auto_created === 1 && reminder.entity_type === 'task'
   // The parent closes this modal only after its save resolves, so without the
   // guard a double-click on Create made two reminders.
   const { inFlight: saving, run: runSave } = useInFlight('save reminder')
@@ -182,6 +189,15 @@ export default function ReminderModal({ reminder, prefs, onSave, onClose }: Prop
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
+          {followsTask && (
+            <p className="text-[11px] text-zinc-500 bg-zinc-100 dark:bg-zinc-700/50 rounded-md px-3 py-2">
+              This reminder follows{' '}
+              <span className="font-medium">{reminder?.entity_title ?? 'its task'}</span>: its due
+              date sets the time, minus the lead time below. Changing the first firing or the repeat
+              makes the schedule yours instead, and the task will stop moving it. Everything else —
+              title, details, intensity, escalation, sound, lead time — is yours already.
+            </p>
+          )}
           <div>
             <label className="block text-xs text-zinc-500 mb-1">Title</label>
             <input
@@ -328,7 +344,9 @@ export default function ReminderModal({ reminder, prefs, onSave, onClose }: Prop
                 className={inputClass}
               />
               <p className="text-[11px] text-zinc-400 mt-1">
-                Recorded for reference; task reminders fire this early.
+                {followsTask
+                  ? "How far before the task's due date this fires — kept when the due date moves."
+                  : 'How early a task reminder fires. Recorded for reference on a standalone one.'}
               </p>
             </div>
           </div>

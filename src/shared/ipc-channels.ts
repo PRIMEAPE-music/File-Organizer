@@ -93,6 +93,8 @@ export const IPC = {
   UPDATE_REMINDER: 'reminders:update',
   DELETE_REMINDER: 'reminders:delete',
   SET_REMINDER_ENABLED: 'reminders:set-enabled',
+  /** Hand a reminder detached by a timing edit back to its task's due date. */
+  RESET_REMINDER_TO_AUTO: 'reminders:reset-to-auto',
   SNOOZE_OCCURRENCE: 'reminders:snooze-occurrence',
   DISMISS_OCCURRENCE: 'reminders:dismiss-occurrence',
   SNOOZE_ALL_REMINDERS: 'reminders:snooze-all',

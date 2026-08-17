@@ -285,6 +285,20 @@ export interface ReminderWithMeta extends Reminder {
 /** Which section of the Reminders tab a reminder belongs in. */
 export type ReminderBucket = 'firing' | 'upcoming' | 'missed' | 'disabled'
 
+/**
+ * Outcome of "Reset to automatic" — handing a reminder that a timing edit detached
+ * back to its task's due date.
+ *
+ * `message` is present when the reset was refused, and also when it succeeded with
+ * a caveat worth saying out loud (the task no longer qualifies, so the reminder is
+ * now following it *and* switched off).
+ */
+export interface ReminderResetResult {
+  ok: boolean
+  message?: string
+  reminder: ReminderWithMeta | null
+}
+
 /** Everything the renderer supplies when creating or editing a reminder. */
 export interface ReminderInput {
   title: string

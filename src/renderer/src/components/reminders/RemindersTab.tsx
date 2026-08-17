@@ -6,9 +6,11 @@ import {
   CheckCircle2,
   ChevronDown,
   Clock,
+  Link2,
   Pencil,
   Plus,
   Repeat,
+  RotateCcw,
   Trash2,
   Zap
 } from 'lucide-react'
@@ -73,6 +75,21 @@ function formatWhen(iso: string | null | undefined): string {
 
 const WEEKDAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
+/**
+ * Who decides when this reminder fires.
+ *
+ * 'follows' — the task's due date moves it, and the user's tier / escalation /
+ *   sound / lead time are respected while it does.
+ * 'yours'  — a timing edit detached it, so the task's due date no longer touches
+ *   it. This state used to be invisible: the user set a reminder up from a task,
+ *   changed its tier, and had no way to know the link was gone.
+ * null     — never task-linked. There is nothing to follow, so no badge.
+ */
+function ownershipOf(reminder: ReminderWithMeta): 'follows' | 'yours' | null {
+  if (reminder.entity_type !== 'task' || reminder.entity_id === null) return null
+  return reminder.auto_created === 1 ? 'follows' : 'yours'
+}
+
 function describeRecurrence(reminder: ReminderWithMeta): string | null {
   if (!reminder.freq) return null
   const every = reminder.interval > 1 ? `every ${reminder.interval} ` : ''
@@ -95,6 +112,7 @@ export default function RemindersTab({ sidebarCollapsed = false }: Props) {
     updateReminder,
     deleteReminder,
     setEnabled,
+    resetToAutomatic,
     snoozeOccurrence,
     dismissOccurrence,
     testFire
@@ -104,6 +122,13 @@ export default function RemindersTab({ sidebarCollapsed = false }: Props) {
   const [modal, setModal] = useState<{ mode: 'create' } | { mode: 'edit'; reminder: ReminderWithMeta } | null>(null)
   const [pendingDelete, setPendingDelete] = useState<ReminderWithMeta | null>(null)
   const [snoozeMenuFor, setSnoozeMenuFor] = useState<number | null>(null)
+  // What "Reset to automatic" said, shown on the row it applies to. A reset can be
+  // refused (the task is gone) or succeed with a caveat (the reminder is now
+  // following the task *and* switched off), and either silently would look like the
+  // button did nothing.
+  const [resetNote, setResetNote] = useState<{ id: number; message: string; ok: boolean } | null>(
+    null
+  )
 
   useEffect(() => {
     window.api.getAppPrefs().then(setPrefs)
@@ -126,6 +151,7 @@ export default function RemindersTab({ sidebarCollapsed = false }: Props) {
 
   const handleSave = async (input: ReminderInput): Promise<void> => {
     if (modal?.mode === 'edit') {
+      setResetNote(null)
       await updateReminder(modal.reminder.id, input)
     } else {
       await createReminder(input)
@@ -133,9 +159,19 @@ export default function RemindersTab({ sidebarCollapsed = false }: Props) {
     setModal(null)
   }
 
+  const handleReset = async (reminder: ReminderWithMeta): Promise<void> => {
+    const result = await resetToAutomatic(reminder.id)
+    setResetNote(result.message ? { id: reminder.id, message: result.message, ok: result.ok } : null)
+  }
+
   const row = (reminder: ReminderWithMeta): React.ReactNode => {
     const firing = reminder.active_occurrence
     const recurrence = describeRecurrence(reminder)
+    const ownership = ownershipOf(reminder)
+    // Only offer the way back while the task is still there to follow — a broken
+    // link has no due date to recompute from.
+    const canReset = ownership === 'yours' && reminder.entity_title !== null
+    const note = resetNote?.id === reminder.id ? resetNote : null
     const nextAt = firing
       ? firing.fire_at
       : reminder.next_occurrence?.state === 'snoozed'
@@ -164,12 +200,21 @@ export default function RemindersTab({ sidebarCollapsed = false }: Props) {
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="text-sm font-medium truncate">{reminder.title}</span>
-            {reminder.auto_created === 1 && (
+            {ownership === 'follows' && (
               <span
-                className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-500"
-                title="Created automatically from a task's priority"
+                className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-accent/10 text-accent shrink-0"
+                title="This reminder follows its task: moving the task's due date moves it. Your tier, escalation, sound and lead time are kept."
               >
-                auto
+                <Link2 className="w-2.5 h-2.5" />
+                Follows task
+              </span>
+            )}
+            {ownership === 'yours' && (
+              <span
+                className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-500 shrink-0"
+                title="You set this reminder's own time, so the task's due date no longer moves it."
+              >
+                Yours
               </span>
             )}
             <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-500">
@@ -217,6 +262,16 @@ export default function RemindersTab({ sidebarCollapsed = false }: Props) {
               {reminder.body}
             </p>
           )}
+
+          {note && (
+            <p
+              className={`text-xs mt-1 ${
+                note.ok ? 'text-zinc-500' : 'text-red-500'
+              }`}
+            >
+              {note.message}
+            </p>
+          )}
         </div>
 
         <div className="flex items-center gap-1 shrink-0">
@@ -259,6 +314,15 @@ export default function RemindersTab({ sidebarCollapsed = false }: Props) {
             </>
           )}
 
+          {canReset && (
+            <button
+              onClick={() => handleReset(reminder)}
+              className="p-1.5 rounded text-zinc-400 hover:text-accent hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
+              title={`Reset to automatic — follow "${reminder.entity_title}" again, recomputing the time from its due date and this reminder's lead time. Clears any repeat.`}
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+            </button>
+          )}
           <button
             onClick={() => testFire(reminder.id)}
             className="p-1.5 rounded text-zinc-400 hover:text-amber-500 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"

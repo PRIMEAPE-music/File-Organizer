@@ -1,17 +1,64 @@
 import * as repo from '../db/repositories/reminders.repo'
-import { dueDateToInstant } from '../utils/recurrence'
+import { getTaskById } from '../db/repositories/tasks.repo'
+import { dueDateToInstant, formatByWeekday } from '../utils/recurrence'
 import { getAppPrefs } from './app-prefs.service'
-import type { Task, TaskPriority, ReminderInput } from '../../shared/types'
+import type {
+  Reminder,
+  ReminderInput,
+  ReminderResetResult,
+  ReminderWithMeta,
+  Task,
+  TaskPriority
+} from '../../shared/types'
 
 /**
  * Automatic reminders derived from task priority.
  *
- * THE RULE THAT MATTERS MOST: this only ever touches `auto_created = 1` rows. A
- * reminder the user set by hand on a task survives every priority change, due
- * date edit and even the task's deletion path here — see
- * `deleteAutoRemindersForEntity`, whose predicate is the guard. Editing a reminder
- * in the Reminders tab clears `auto_created`, so a customised reminder becomes the
- * user's and this stops rewriting it.
+ * ─────────────────────────────────────────────────────────────────────────────
+ * THE TASK OWNS *WHEN*. THE USER OWNS *HOW*.
+ *
+ * That split is the whole design, and it exists because the previous rule was
+ * wrong in a way the user hit within minutes of real use. Any edit to an auto
+ * reminder used to clear `auto_created`, fully detaching it — so setting a task
+ * reminder up from the task, then changing its tier in the Reminders tab, silently
+ * stopped the task's due date from ever moving it again. Nothing said so.
+ *
+ * So, after the row is created:
+ *
+ *  - THE AUTOMATION MAY WRITE `fire_at` AND `enabled`. Nothing else. It never
+ *    touches intensity, escalate_after_min, sound, body, freq, interval,
+ *    byweekday, lead_time_min or title — see `repo.setAutoReminderFireAt`, whose
+ *    UPDATE names exactly one column and is fenced by `auto_created = 1`. This is
+ *    what makes keeping the link safe: there is no longer anything of the user's
+ *    for a task save to revert.
+ *
+ *  - `fire_at` IS DERIVED FROM THE TASK'S DUE DATE MINUS THE REMINDER'S OWN
+ *    `lead_time_min` — not the preference default. "Remind me two days before
+ *    this deadline" is a per-reminder decision, and it keeps following the task
+ *    when the deadline moves. The pref supplies only the value the row is created
+ *    with.
+ *
+ *  - ONLY A TIMING EDIT DETACHES: `fire_at`, `freq`, `interval`, `byweekday` —
+ *    see `editDetachesFromTask`. Everything else is style or config and keeps the
+ *    link. The decision is made by comparing the submitted values against the
+ *    stored row, never from a flag the renderer sends: a renderer that forgot to
+ *    set it would silently detach reminders again.
+ *
+ *  - A DETACHED REMINDER CAN BE HANDED BACK, once, explicitly —
+ *    `resetTaskReminderToAutomatic`. Nothing else re-adopts a row the user took
+ *    over, on this machine or (see below) on the other one.
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * This still only ever touches `auto_created = 1` rows. A reminder the user set by
+ * hand survives every priority change, due date edit and even the task's deletion
+ * path here — see `deleteAutoRemindersForEntity`, whose predicate is the guard.
+ *
+ * SYNC: `auto_created` is part of the synced reminder definition, so a detach
+ * travels as a field change under last-write-wins. The receiving machine then sees
+ * a task whose only reminder is `auto_created = 0`, and the create path below
+ * declines to add one (`countRemindersForEntity > 0`) while the update path never
+ * finds it (`findAutoReminderForEntity` requires `auto_created = 1`). A reminder
+ * detached on one machine therefore stays detached on both.
  *
  * ONE REMINDER PER TASK, and identity is preserved for sync:
  *
@@ -31,6 +78,8 @@ import type { Task, TaskPriority, ReminderInput } from '../../shared/types'
  * reconcile-everything pass would do exactly that.
  */
 
+const MINUTE_MS = 60_000
+
 const PRIORITY_RANK: Record<TaskPriority, number> = {
   low: 0,
   medium: 1,
@@ -48,8 +97,11 @@ export function meetsThreshold(priority: string, threshold: TaskPriority): boole
 
 /**
  * The instant an auto reminder for this task should fire, or null if it should
- * not exist: no due date, a due date already past, or the lead time pushing the
- * firing into the past.
+ * not exist: no due date, or a due date already past.
+ *
+ * `leadMinutes` is the REMINDER'S OWN lead time once the row exists, and the
+ * preference default only for a row being created. That is what lets "two days
+ * before this deadline" survive the deadline moving.
  *
  * A date-only `due_date` (which is all `<input type="date">` produces) is read as
  * 9am local on that day — see `dueDateToInstant`. Midnight would be a hostile
@@ -79,6 +131,9 @@ export interface AutoReminderOutcome {
 /**
  * Bring a task's automatic reminder into line with its current priority and due
  * date. Safe to call on every create/update — it is a reconcile, not a toggle.
+ *
+ * WHAT THIS WRITES on an existing row: `fire_at` and `enabled`, and nothing else.
+ * See the ownership split at the top of this file.
  */
 export function syncTaskAutoReminder(
   task: Pick<Task, 'id' | 'title' | 'priority' | 'due_date' | 'status'>,
@@ -96,9 +151,11 @@ export function syncTaskAutoReminder(
   // completed task is not owed a reminder whatever its priority says.
   const qualifies =
     task.status !== 'done' && meetsThreshold(task.priority, prefs.reminderPriorityThreshold)
-  const fireAt = qualifies
-    ? computeAutoFireAt(task.due_date, prefs.reminderDefaultLeadMin, nowMs)
-    : null
+  // The reminder's own lead time, not the preference default — a per-reminder
+  // decision the automation respects rather than overwrites. The pref supplies only
+  // the value a brand-new row is created with.
+  const leadMinutes = existing ? existing.lead_time_min : prefs.reminderDefaultLeadMin
+  const fireAt = qualifies ? computeAutoFireAt(task.due_date, leadMinutes, nowMs) : null
 
   if (!fireAt) {
     // Completed, dropped below the threshold, lost its due date, or the due date has
@@ -114,10 +171,50 @@ export function syncTaskAutoReminder(
     return { action: dupesRemoved > 0 ? 'updated' : 'none', reminderId: null }
   }
 
+  const targetFireAt = fireAt.toISOString()
+
+  if (existing) {
+    // THE NARROW WRITE. `fire_at` and `enabled` are the only columns the automation
+    // may touch on a row that already exists; the user's tier, escalation, sound,
+    // body, lead time and title are theirs from the moment the row is created.
+    //
+    // This used to be a whole-row `updateReminder` from preference defaults, which
+    // is precisely why every human edit had to detach the reminder to survive.
+    let changed = false
+    // Unchanged time: don't rewrite the row, and don't discard its pending
+    // occurrence, just because the task was saved again.
+    if (existing.fire_at !== targetFireAt) {
+      // In place, so the row keeps its `sync_id` and both machines go on agreeing
+      // about which reminder this is.
+      changed = repo.setAutoReminderFireAt(existing.id, targetFireAt)
+    }
+    // Re-arms one the automation had disabled. Ordered after the time change so the
+    // occurrences are materialised from the new fire_at, not the old one — while a
+    // row is disabled, materialisation is a no-op.
+    if (!existing.enabled) {
+      repo.setReminderEnabled(existing.id, true)
+      changed = true
+    }
+    if (!changed) {
+      return { action: dupesRemoved > 0 ? 'updated' : 'none', reminderId: existing.id }
+    }
+    return { action: 'updated', reminderId: existing.id }
+  }
+
+  // No auto reminder for this task. If the user already has one here — hand-made,
+  // or an auto reminder they detached with a timing edit — leave it alone rather
+  // than adding a second reminder for one task. This is also what stops the
+  // receiving machine re-adopting a reminder detached on the other one.
+  if (repo.countRemindersForEntity('task', task.id) > 0) {
+    return { action: dupesRemoved > 0 ? 'updated' : 'none', reminderId: null }
+  }
+
+  // CREATION is the one moment the preference defaults apply. Everything below is
+  // the row's own from here on.
   const input: ReminderInput = {
     title: `Task due: ${task.title}`,
     body: null,
-    fire_at: fireAt.toISOString(),
+    fire_at: targetFireAt,
     freq: null,
     interval: 1,
     byweekday: null,
@@ -128,39 +225,135 @@ export function syncTaskAutoReminder(
     entity_type: 'task',
     entity_id: task.id
   }
-
-  if (existing) {
-    // Nothing meaningful changed — don't rewrite the row (and don't discard its
-    // pending occurrence) just because the task was saved again.
-    if (
-      existing.enabled === 1 &&
-      existing.fire_at === input.fire_at &&
-      existing.title === input.title &&
-      existing.intensity === input.intensity &&
-      existing.escalate_after_min === input.escalate_after_min &&
-      existing.lead_time_min === input.lead_time_min
-    ) {
-      return { action: dupesRemoved > 0 ? 'updated' : 'none', reminderId: existing.id }
-    }
-    // In place, so the row keeps its `sync_id` and both machines go on agreeing
-    // about which reminder this is. No takeOwnership: this row belongs to the
-    // automation.
-    repo.updateReminder(existing.id, input)
-    // Re-arms one the automation had disabled. Ordered after the update so the
-    // occurrences are materialised from the new fire_at, not the old one.
-    if (!existing.enabled) repo.setReminderEnabled(existing.id, true)
-    return { action: 'updated', reminderId: existing.id }
-  }
-
-  // No auto reminder for this task. If the user already has one here — hand-made,
-  // or an auto reminder they edited and thereby took ownership of — leave it alone
-  // rather than adding a second reminder for one task.
-  if (repo.countRemindersForEntity('task', task.id) > 0) {
-    return { action: dupesRemoved > 0 ? 'updated' : 'none', reminderId: null }
-  }
-
   const created = repo.createReminder(input, { autoCreated: true })
   return { action: 'created', reminderId: created.id }
+}
+
+/**
+ * Does this edit mean "I want my own schedule"?
+ *
+ * The single decision that replaces the old blanket detach on IPC.UPDATE_REMINDER.
+ * True for a change to an absolute time or a recurrence; false for style and
+ * config, which the automation no longer overwrites and so has no reason to
+ * detach.
+ *
+ * DERIVED FROM THE STORED ROW, never from a renderer flag: the failure mode of a
+ * flag is silent detachment, which is the exact bug being fixed.
+ *
+ * `fire_at` is compared AT MINUTE GRANULARITY. The editor is a `datetime-local`
+ * input, which cannot express seconds, so it round-trips a stored
+ * `…T14:23:47.512Z` (which the near-due clamp in `computeAutoFireAt` produces) back
+ * as `…T14:23:00.000Z`. Comparing exact instants would read that truncation as a
+ * deliberate time change and detach a reminder the user only re-tiered — the bug,
+ * in miniature. A real edit moves the time by at least a minute and is still seen.
+ */
+export function editDetachesFromTask(current: Reminder, input: ReminderInput): boolean {
+  // Nothing to detach: already the user's, or never the automation's.
+  if (current.auto_created !== 1) return false
+
+  const storedMinute = instantMinute(current.fire_at)
+  const submittedMinute = instantMinute(input.fire_at)
+  // An unparseable stored time cannot be compared. Treat the submitted one as
+  // deliberate rather than keeping a link whose anchor we cannot read.
+  if (storedMinute === null || submittedMinute === null) return true
+  if (storedMinute !== submittedMinute) return true
+
+  if ((input.freq ?? null) !== current.freq) return true
+  // Normalised exactly as the repository would store them, so a value the write
+  // path would have coerced is not mistaken for a change.
+  const submittedInterval =
+    Number.isInteger(input.interval) && input.interval > 0 ? input.interval : 1
+  if (submittedInterval !== current.interval) return true
+  if (formatByWeekday(input.byweekday) !== current.byweekday) return true
+
+  return false
+}
+
+/** Epoch minutes for an ISO instant, or null when it will not parse. */
+function instantMinute(iso: string): number | null {
+  const ms = Date.parse(iso)
+  return Number.isFinite(ms) ? Math.floor(ms / MINUTE_MS) : null
+}
+
+/**
+ * "Reset to automatic" — hand a detached reminder back to its task.
+ *
+ * The escape hatch that makes the ownership split honest: a timing edit is a
+ * one-way door otherwise, and the previous build's silent detachment left users
+ * with no way back at all.
+ *
+ * Explicit and user-initiated, which is why it may write more than the automation
+ * ever does — it clears the recurrence (see `repo.adoptReminderAsAutomatic`) and
+ * then reconciles, which recomputes `fire_at` from the task's due date and the
+ * reminder's own lead time. The user's tier, escalation, sound, body and title are
+ * still untouched: this restores *when*, not *how*.
+ *
+ * Refuses rather than duplicates when the task somehow already has an automatic
+ * reminder — one task, one reminder, and `dedupeAutoRemindersForEntity` would
+ * otherwise resolve the collision by deleting a row.
+ */
+export function resetTaskReminderToAutomatic(
+  reminderId: number,
+  nowMs: number = Date.now()
+): ReminderResetResult {
+  const current = repo.getRawReminder(reminderId)
+  if (!current) {
+    return { ok: false, message: 'That reminder no longer exists.', reminder: null }
+  }
+
+  const asMeta = (): ReminderWithMeta | null => repo.getReminderById(reminderId) ?? null
+
+  if (current.auto_created === 1) {
+    // Already following its task. Idempotent rather than an error: two clicks on
+    // the same row should not produce a failure banner.
+    return { ok: true, reminder: asMeta() }
+  }
+  if (current.entity_type !== 'task' || current.entity_id === null) {
+    return {
+      ok: false,
+      message: 'This reminder is not linked to a task, so there is nothing to follow.',
+      reminder: asMeta()
+    }
+  }
+
+  const task = getTaskById(current.entity_id)
+  if (!task) {
+    return {
+      ok: false,
+      message: 'The task this reminder came from no longer exists.',
+      reminder: asMeta()
+    }
+  }
+
+  const rival = repo.findAutoReminderForEntity('task', task.id)
+  if (rival && rival.id !== reminderId) {
+    return {
+      ok: false,
+      message: 'That task already has an automatic reminder.',
+      reminder: asMeta()
+    }
+  }
+
+  if (!repo.adoptReminderAsAutomatic(reminderId)) {
+    return { ok: false, message: 'This reminder could not be reset.', reminder: asMeta() }
+  }
+
+  // The reconcile is what sets the time; adopting only makes the row eligible.
+  syncTaskAutoReminder(task, nowMs)
+
+  const reminder = asMeta()
+  if (reminder && reminder.enabled === 0) {
+    // Honest about a reset that produced a switched-off reminder: the automation
+    // disables rather than deletes when a task stops qualifying, and the user
+    // deserves to know why their reminder just went quiet.
+    return {
+      ok: true,
+      message:
+        'Following the task again. It is off for now — the task is complete, below the reminder threshold, or has no future due date.',
+      reminder
+    }
+  }
+  return { ok: true, reminder }
 }
 
 /** Called when a task is deleted. Hand-made reminders for it are NOT removed. */
@@ -175,9 +368,13 @@ export function removeTaskAutoReminder(taskId: number): number {
  * Ticking the box on a task that already has an automatic reminder ADOPTS that row
  * rather than adding a second reminder for the same task: an explicit opt-in is a
  * user decision, and one task should have one reminder. The row keeps its `sync_id`
- * (so the other machine updates rather than accumulates) and loses `auto_created`,
- * which is what stops the automation reverting the user's lead time on the next
- * task save.
+ * (so the other machine updates rather than accumulates) and loses `auto_created`.
+ *
+ * WHY THIS STILL DETACHES, when a mere tier change in the Reminders tab does not:
+ * it writes an absolute `fire_at` derived from the lead time the user just typed
+ * into the task modal, and honours it even when the task is already due — a timing
+ * decision, and timing is what detaches. "Reset to automatic" in the Reminders tab
+ * hands it back.
  *
  * @param enabled false removes the manual reminder (and only the manual one).
  */

@@ -57,7 +57,14 @@ interface SyncPayload {
    * behaviour.
    */
   reminders?: SyncReminder[]
-  preferences: SyncPreferences
+  /**
+   * OPTIONAL ON READ, for the same reason `reminders` is: the importer must treat a
+   * payload without this key as "no preferences to apply" rather than throwing. It
+   * did throw — `writeJsonAtomic(path, undefined)` — after the transaction had
+   * already committed, so a wholly successful import reported failure and never
+   * advanced `lastSyncedAt`. Always written by `exportData`.
+   */
+  preferences?: SyncPreferences
 }
 
 /**
@@ -1317,22 +1324,66 @@ export function importData(): { result: SyncResult; preferences: SyncPreferences
       )
     }
 
+    /**
+     * A PAYLOAD WITH NO `preferences` IS AN IMPORT WITH NOTHING TO APPLY, not a
+     * failure.
+     *
+     * `writeJsonAtomic(syncedPrefsPath(), undefined)` threw
+     * `The "data" argument must be of type string… Received undefined` — and it threw
+     * *after* the transaction had committed. So `importData` returned
+     * `success: false` for an import that had entirely succeeded, and because
+     * `lastSyncedAt` never advanced, the same payload was re-imported on every
+     * launch and every Sync Now, forever.
+     *
+     * Not just `undefined`: an array or a scalar in this slot would sail through
+     * `writeJsonAtomic` and be handed to the renderer as a prefs object.
+     */
+    const preferences: SyncPreferences | null =
+      data.preferences && typeof data.preferences === 'object' && !Array.isArray(data.preferences)
+        ? data.preferences
+        : null
+
     // Reminder behaviour settings travel with the payload so both machines make the
     // same automation decisions. Main-process owned, so applied here rather than
     // through the renderer's prefs path.
-    applyImportedReminderPrefs(data.preferences)
+    applyImportedReminderPrefs(preferences ?? undefined)
 
     // Persist synced prefs so renderer can apply them on next startup.
     // backup:false — purely derived from the payload we just read, and consumed
     // (then deleted) by the renderer on next launch.
-    writeJsonAtomic(syncedPrefsPath(), data.preferences, { backup: false })
+    //
+    // Skipped entirely when there are none. Any file a previous import left is left
+    // alone rather than cleared: it is still that payload's data, and the renderer
+    // deletes it once consumed.
+    if (preferences) writeJsonAtomic(syncedPrefsPath(), preferences, { backup: false })
 
-    config.lastSyncedAt = data.exportedAt
+    /**
+     * `exportedAt` is written by another machine and is not validated by the reader,
+     * so it can be absent, a number, or an unparseable string. It used to be
+     * formatted straight into the result, producing the user-facing message "Synced
+     * from Invalid Date", and stored verbatim as `lastSyncedAt` — where a non-string
+     * is then rejected by `getSyncConfig` on the next read, silently resetting
+     * progress to null.
+     *
+     * Falling back to "now" for `lastSyncedAt` is the honest answer to "when did we
+     * last sync": the payload could not say when it was written, but this machine
+     * does know when it read it.
+     */
+    const exportedAt = usableTimestamp(data.exportedAt)
+
+    config.lastSyncedAt = exportedAt ?? new Date().toISOString()
     setSyncConfig(config)
 
     return {
-      result: { success: true, message: `Synced from ${new Date(data.exportedAt).toLocaleString()}`, exportedAt: data.exportedAt },
-      preferences: data.preferences
+      result: {
+        success: true,
+        message: exportedAt
+          ? `Synced from ${new Date(exportedAt).toLocaleString()}`
+          : 'Synced (the sync file does not say when it was written)',
+        // Omitted rather than guessed: callers use this as the remote's generation.
+        ...(exportedAt ? { exportedAt } : {})
+      },
+      preferences
     }
   } catch (err) {
     return { result: { success: false, message: `Import failed: ${(err as Error).message}` }, preferences: null }

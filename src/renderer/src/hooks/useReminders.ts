@@ -65,6 +65,20 @@ export function useReminders() {
     [refresh]
   )
 
+  /**
+   * Hand a reminder that a timing edit detached back to its task. Returns the
+   * outcome so the caller can surface a refusal (or a "reset, but now switched
+   * off") rather than appearing to do nothing.
+   */
+  const resetToAutomatic = useCallback(
+    async (id: number) => {
+      const result = await window.api.resetReminderToAuto(id)
+      await refresh()
+      return result
+    },
+    [refresh]
+  )
+
   const snoozeOccurrence = useCallback(
     async (occurrenceId: number, choice: ReminderSnoozeChoice) => {
       await window.api.snoozeOccurrence(occurrenceId, choice)
@@ -93,6 +107,7 @@ export function useReminders() {
     updateReminder,
     deleteReminder,
     setEnabled,
+    resetToAutomatic,
     snoozeOccurrence,
     dismissOccurrence,
     testFire
