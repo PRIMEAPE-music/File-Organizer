@@ -86,6 +86,25 @@ export const IPC = {
   UPDATE_TASK_TAG: 'task-tags:update',
   DELETE_TASK_TAG: 'task-tags:delete',
 
+  // ─── Reminders ───
+  GET_REMINDERS: 'reminders:get-all',
+  GET_REMINDER: 'reminders:get-one',
+  CREATE_REMINDER: 'reminders:create',
+  UPDATE_REMINDER: 'reminders:update',
+  DELETE_REMINDER: 'reminders:delete',
+  SET_REMINDER_ENABLED: 'reminders:set-enabled',
+  SNOOZE_OCCURRENCE: 'reminders:snooze-occurrence',
+  DISMISS_OCCURRENCE: 'reminders:dismiss-occurrence',
+  SNOOZE_ALL_REMINDERS: 'reminders:snooze-all',
+  TEST_FIRE_REMINDER: 'reminders:test-fire',
+  GET_TASK_REMINDER: 'reminders:get-for-task',
+  SET_TASK_REMINDER: 'reminders:set-for-task',
+
+  // Alert window (the popup/blackout surface talks over these)
+  REMINDER_ALERT_GET: 'reminder-alert:get',
+  REMINDER_ALERT_ACK: 'reminder-alert:ack',
+  REMINDER_ALERT_SNOOZE: 'reminder-alert:snooze',
+
   // ─── Window Management ───
   SET_WINDOW_MODE: 'window:set-mode',
   GET_WINDOW_MODE: 'window:get-mode',
@@ -121,5 +140,7 @@ export const IPC = {
   SCAN_PROGRESS: 'event:scan-progress',
   WINDOW_MODE_CHANGED: 'event:window-mode-changed',
   WIDGET_STATE_CHANGED: 'event:widget-state-changed',
-  PERSISTENCE_ISSUE: 'event:persistence-issue'
+  PERSISTENCE_ISSUE: 'event:persistence-issue',
+  REMINDERS_CHANGED: 'event:reminders-changed',
+  REMINDER_ALERT_CHANGED: 'event:reminder-alert-changed'
 } as const

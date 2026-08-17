@@ -2,7 +2,7 @@ import { app } from 'electron'
 import path from 'path'
 import { loadJson, writeJsonAtomic } from '../utils/safe-fs'
 import { guardWrite, reportPersistenceIssue } from '../utils/error-reporter'
-import type { AppPreferences } from '../../shared/types'
+import type { AppPreferences, ReminderIntensity, TaskPriority } from '../../shared/types'
 
 /**
  * App-level behaviour preferences that the main process needs before (and
@@ -15,8 +15,24 @@ export const HIDDEN_ARG = '--hidden'
 
 const DEFAULTS: AppPreferences = {
   closeToTray: true,
-  openAtLogin: false
+  openAtLogin: false,
+  // 'high' means high AND urgent qualify.
+  reminderPriorityThreshold: 'high',
+  // 0 = fire at the due moment itself. A date-only due date is read as 9am local,
+  // so the out-of-the-box behaviour is "9am on the day it's due".
+  reminderDefaultLeadMin: 0,
+  // Matches the schema default. Starting everyone at a full-screen blackout would
+  // be a hostile default; escalation is what gets louder.
+  reminderDefaultIntensity: 'toast',
+  reminderDefaultEscalateMin: 5
 }
+
+const PRIORITIES: TaskPriority[] = ['low', 'medium', 'high', 'urgent']
+const INTENSITIES: ReminderIntensity[] = ['toast', 'popup', 'blackout']
+
+/** Clamp so a hand-edited prefs file can't produce a nonsense schedule. */
+const MAX_LEAD_MIN = 60 * 24 * 30
+const MAX_ESCALATE_MIN = 60 * 24
 
 const prefsPath = (): string => path.join(app.getPath('userData'), 'app-prefs.json')
 
@@ -32,7 +48,27 @@ export function getAppPrefs(): AppPreferences {
     if (issue) reportPersistenceIssue('corrupt', issue.file, issue.detail)
     cached = {
       closeToTray: typeof data.closeToTray === 'boolean' ? data.closeToTray : DEFAULTS.closeToTray,
-      openAtLogin: typeof data.openAtLogin === 'boolean' ? data.openAtLogin : DEFAULTS.openAtLogin
+      openAtLogin: typeof data.openAtLogin === 'boolean' ? data.openAtLogin : DEFAULTS.openAtLogin,
+      // Field-by-field validation, same as above: these feed the scheduler, and a
+      // garbage value there is a reminder that fires at the wrong time or never.
+      reminderPriorityThreshold: PRIORITIES.includes(data.reminderPriorityThreshold as TaskPriority)
+        ? (data.reminderPriorityThreshold as TaskPriority)
+        : DEFAULTS.reminderPriorityThreshold,
+      reminderDefaultLeadMin:
+        typeof data.reminderDefaultLeadMin === 'number' && Number.isFinite(data.reminderDefaultLeadMin)
+          ? Math.min(MAX_LEAD_MIN, Math.max(0, Math.round(data.reminderDefaultLeadMin)))
+          : DEFAULTS.reminderDefaultLeadMin,
+      reminderDefaultIntensity: INTENSITIES.includes(data.reminderDefaultIntensity as ReminderIntensity)
+        ? (data.reminderDefaultIntensity as ReminderIntensity)
+        : DEFAULTS.reminderDefaultIntensity,
+      reminderDefaultEscalateMin:
+        data.reminderDefaultEscalateMin === null
+          ? null
+          : typeof data.reminderDefaultEscalateMin === 'number' &&
+              Number.isFinite(data.reminderDefaultEscalateMin) &&
+              data.reminderDefaultEscalateMin > 0
+            ? Math.min(MAX_ESCALATE_MIN, Math.round(data.reminderDefaultEscalateMin))
+            : DEFAULTS.reminderDefaultEscalateMin
     }
   }
   return cached

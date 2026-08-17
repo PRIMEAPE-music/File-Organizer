@@ -9,11 +9,39 @@ import FloatingParticles from './components/FloatingParticles'
 import FilesTab from './components/FilesTab'
 import NotesTab from './components/notes/NotesTab'
 import TasksTab from './components/tasks/TasksTab'
+import RemindersTab from './components/reminders/RemindersTab'
 import SyncModal from './components/SyncModal'
 import SettingsModal from './components/SettingsModal'
 import PersistenceBanner from './components/PersistenceBanner'
+import AlertWindow, { AlertDimWindow } from './components/AlertWindow'
+
+/**
+ * Which surface this window is.
+ *
+ * electron-vite has a single `index.html`, so the reminder alert windows load the
+ * same bundle with a hash instead of getting their own build entry. Resolved once
+ * at module scope: a window never changes role, so this is a constant and the
+ * early return below cannot make hook order vary between renders.
+ */
+type WindowRole = 'main' | 'alert' | 'alert-dim'
+
+const windowRole: WindowRole = (() => {
+  const hash = window.location.hash
+  if (hash.startsWith('#/alert-dim')) return 'alert-dim'
+  if (hash.startsWith('#/alert/')) return 'alert'
+  return 'main'
+})()
 
 export default function App() {
+  // Ahead of every hook, deliberately: an alert window must not spin up the main
+  // app's state, its sync effects or its file watching just to show one message.
+  if (windowRole === 'alert-dim') return <AlertDimWindow />
+  if (windowRole === 'alert') return <AlertWindow />
+
+  return <MainApp />
+}
+
+function MainApp() {
   const { theme, toggleTheme } = useTheme()
   const { windowMode, widgetState, isWidget, isExpanded, toggleMode, toggleWidget } = useWindowMode()
   const { issues, dismiss: dismissIssue } = usePersistenceIssues()
@@ -110,6 +138,7 @@ export default function App() {
             {activeTab === 'files' && <FilesTab viewMode={viewMode} onSetViewMode={setViewMode} sidebarCollapsed={sidebarCollapsed} />}
             {activeTab === 'notes' && <NotesTab sidebarCollapsed={sidebarCollapsed} />}
             {activeTab === 'tasks' && <TasksTab sidebarCollapsed={sidebarCollapsed} />}
+            {activeTab === 'reminders' && <RemindersTab sidebarCollapsed={sidebarCollapsed} />}
           </div>
         )}
         <GrabTab widgetState={widgetState} onToggle={toggleWidget} />
@@ -138,6 +167,7 @@ export default function App() {
       {activeTab === 'files' && <FilesTab viewMode={viewMode} onSetViewMode={setViewMode} sidebarCollapsed={sidebarCollapsed} />}
       {activeTab === 'notes' && <NotesTab sidebarCollapsed={sidebarCollapsed} />}
       {activeTab === 'tasks' && <TasksTab sidebarCollapsed={sidebarCollapsed} />}
+      {activeTab === 'reminders' && <RemindersTab sidebarCollapsed={sidebarCollapsed} />}
       {modals}
     </div>
   )

@@ -24,7 +24,13 @@ import type {
   SyncPreferences,
   SyncNowResult,
   AppPreferences,
-  PersistenceIssue
+  PersistenceIssue,
+  Reminder,
+  ReminderAlertPayload,
+  ReminderInput,
+  ReminderIntensity,
+  ReminderSnoozeChoice,
+  ReminderWithMeta
 } from '../shared/types'
 
 const api = {
@@ -166,6 +172,46 @@ const api = {
   deleteTaskTag: (id: number): Promise<void> =>
     ipcRenderer.invoke(IPC.DELETE_TASK_TAG, id),
 
+  // ─── Reminders ───
+  getReminders: (): Promise<ReminderWithMeta[]> =>
+    ipcRenderer.invoke(IPC.GET_REMINDERS),
+  getReminder: (id: number): Promise<ReminderWithMeta | undefined> =>
+    ipcRenderer.invoke(IPC.GET_REMINDER, id),
+  createReminder: (input: ReminderInput): Promise<ReminderWithMeta> =>
+    ipcRenderer.invoke(IPC.CREATE_REMINDER, input),
+  updateReminder: (id: number, input: ReminderInput): Promise<ReminderWithMeta | undefined> =>
+    ipcRenderer.invoke(IPC.UPDATE_REMINDER, id, input),
+  deleteReminder: (id: number): Promise<void> =>
+    ipcRenderer.invoke(IPC.DELETE_REMINDER, id),
+  setReminderEnabled: (id: number, enabled: boolean): Promise<ReminderWithMeta | undefined> =>
+    ipcRenderer.invoke(IPC.SET_REMINDER_ENABLED, id, enabled),
+  snoozeOccurrence: (occurrenceId: number, choice: ReminderSnoozeChoice): Promise<void> =>
+    ipcRenderer.invoke(IPC.SNOOZE_OCCURRENCE, occurrenceId, choice),
+  dismissOccurrence: (occurrenceId: number): Promise<void> =>
+    ipcRenderer.invoke(IPC.DISMISS_OCCURRENCE, occurrenceId),
+  snoozeAllReminders: (minutes?: number): Promise<number> =>
+    ipcRenderer.invoke(IPC.SNOOZE_ALL_REMINDERS, minutes),
+  testFireReminder: (id: number, tier?: ReminderIntensity): Promise<boolean> =>
+    ipcRenderer.invoke(IPC.TEST_FIRE_REMINDER, id, tier),
+  getTaskReminder: (taskId: number): Promise<{ manual: Reminder | null; auto: Reminder | null }> =>
+    ipcRenderer.invoke(IPC.GET_TASK_REMINDER, taskId),
+  setTaskReminder: (
+    taskId: number,
+    enabled: boolean,
+    leadMinutes: number
+  ): Promise<{ ok: boolean; message?: string; reminderId: number | null }> =>
+    ipcRenderer.invoke(IPC.SET_TASK_REMINDER, taskId, enabled, leadMinutes),
+
+  // Alert window
+  reminderAlertGet: (): Promise<ReminderAlertPayload | null> =>
+    ipcRenderer.invoke(IPC.REMINDER_ALERT_GET),
+  reminderAlertAck: (occurrenceId: number | null): Promise<void> =>
+    ipcRenderer.invoke(IPC.REMINDER_ALERT_ACK, occurrenceId),
+  reminderAlertSnooze: (
+    occurrenceId: number | null,
+    choice: ReminderSnoozeChoice
+  ): Promise<void> => ipcRenderer.invoke(IPC.REMINDER_ALERT_SNOOZE, occurrenceId, choice),
+
   // ─── Sync ───
   getSyncConfig: (): Promise<SyncConfig> =>
     ipcRenderer.invoke(IPC.SYNC_GET_CONFIG),
@@ -237,6 +283,19 @@ const api = {
     const handler = (_e: Electron.IpcRendererEvent, issue: PersistenceIssue): void => callback(issue)
     ipcRenderer.on(IPC.PERSISTENCE_ISSUE, handler)
     return () => ipcRenderer.removeListener(IPC.PERSISTENCE_ISSUE, handler)
+  },
+  onRemindersChanged: (callback: () => void): (() => void) => {
+    const handler = (): void => callback()
+    ipcRenderer.on(IPC.REMINDERS_CHANGED, handler)
+    return () => ipcRenderer.removeListener(IPC.REMINDERS_CHANGED, handler)
+  },
+  onReminderAlertChanged: (
+    callback: (payload: ReminderAlertPayload) => void
+  ): (() => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, payload: ReminderAlertPayload): void =>
+      callback(payload)
+    ipcRenderer.on(IPC.REMINDER_ALERT_CHANGED, handler)
+    return () => ipcRenderer.removeListener(IPC.REMINDER_ALERT_CHANGED, handler)
   }
 }
 

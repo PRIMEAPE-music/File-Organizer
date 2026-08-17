@@ -1,10 +1,11 @@
-import { FileText, StickyNote, CheckSquare, Sun, Moon, Minus, Square, X, PanelLeft, PanelLeftClose, PanelLeftOpen, Wifi, Settings } from 'lucide-react'
+import { FileText, StickyNote, CheckSquare, Bell, Sun, Moon, Minus, Square, X, PanelLeft, PanelLeftClose, PanelLeftOpen, Wifi, Settings } from 'lucide-react'
 import type { AppTab, ThemeMode, WindowMode } from '../../../shared/types'
 
 const tabs: { id: AppTab; label: string; icon: typeof FileText }[] = [
   { id: 'files', label: 'Files', icon: FileText },
   { id: 'notes', label: 'Notes', icon: StickyNote },
-  { id: 'tasks', label: 'Tasks', icon: CheckSquare }
+  { id: 'tasks', label: 'Tasks', icon: CheckSquare },
+  { id: 'reminders', label: 'Reminders', icon: Bell }
 ]
 
 interface TabBarProps {

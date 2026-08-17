@@ -1,4 +1,5 @@
 import { getDb } from '../database'
+import { NOW_MS_EXPR } from '../timestamp'
 import type { Task, TaskWithMeta, TaskFilterState, TaskCategory, TaskTag, TaskStatus } from '../../../shared/types'
 
 function enrichTask(task: Task): TaskWithMeta {
@@ -71,9 +72,12 @@ export function createTask(data: {
   const maxOrder = db.prepare('SELECT MAX(sort_order) as m FROM tasks WHERE status = ?').get(status) as { m: number | null }
   const sortOrder = (maxOrder.m ?? 0) + 1000
 
+  // Explicit millisecond timestamps, not the second-resolution column defaults:
+  // `created_at` is a sync merge key and two tasks created in the same second used
+  // to collide (see NOW_MS_EXPR). `sync_id` comes from the migration-3 trigger.
   const info = db.prepare(`
-    INSERT INTO tasks (title, description, status, priority, due_date, sort_order, category_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO tasks (title, description, status, priority, due_date, sort_order, category_id, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ${NOW_MS_EXPR}, ${NOW_MS_EXPR})
   `).run(
     data.title,
     data.description || '',
@@ -97,7 +101,7 @@ export function updateTask(id: number, data: {
   const db = getDb()
   const current = db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as Task
   db.prepare(`
-    UPDATE tasks SET title = ?, description = ?, status = ?, priority = ?, due_date = ?, category_id = ?, updated_at = datetime('now')
+    UPDATE tasks SET title = ?, description = ?, status = ?, priority = ?, due_date = ?, category_id = ?, updated_at = ${NOW_MS_EXPR}
     WHERE id = ?
   `).run(
     data.title ?? current.title,
@@ -116,7 +120,7 @@ export function deleteTask(id: number): void {
 }
 
 export function reorderTask(id: number, status: TaskStatus, sortOrder: number): void {
-  getDb().prepare("UPDATE tasks SET status = ?, sort_order = ?, updated_at = datetime('now') WHERE id = ?").run(status, sortOrder, id)
+  getDb().prepare(`UPDATE tasks SET status = ?, sort_order = ?, updated_at = ${NOW_MS_EXPR} WHERE id = ?`).run(status, sortOrder, id)
 }
 
 export function setTaskCategory(taskId: number, categoryId: number | null): void {

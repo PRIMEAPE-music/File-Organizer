@@ -1,8 +1,29 @@
 import { ipcMain } from 'electron'
 import { IPC } from '../../shared/ipc-channels'
-import type { TaskFilterState, TaskStatus } from '../../shared/types'
+import type { TaskFilterState, TaskStatus, TaskWithMeta } from '../../shared/types'
 import * as tasksRepo from '../db/repositories/tasks.repo'
 import * as taskCatsRepo from '../db/repositories/task-categories.repo'
+import { removeTaskAutoReminder, syncTaskAutoReminder } from '../services/task-reminder.service'
+import { rescheduleNow } from '../services/reminder.service'
+
+/**
+ * The priority automation is driven from here rather than from tasks.repo,
+ * because deciding whether a task deserves a reminder needs app preferences
+ * (threshold, lead time) — a dependency the repository layer has no business
+ * carrying. It runs only on these create/update/delete paths, which is what makes
+ * "no backfill" true: nothing ever sweeps the existing task table.
+ *
+ * A failure here must not lose the user's task edit, so the reminder side effect
+ * is isolated: the task write has already committed by the time it runs.
+ */
+function reconcileTaskReminder(task: TaskWithMeta): void {
+  try {
+    const outcome = syncTaskAutoReminder(task)
+    if (outcome.action !== 'none') rescheduleNow()
+  } catch (err) {
+    console.error(`[reminders] task automation failed for task ${task.id}: ${(err as Error).message}`)
+  }
+}
 
 export function registerTaskHandlers(): void {
   // Tasks
@@ -15,15 +36,26 @@ export function registerTaskHandlers(): void {
   })
 
   ipcMain.handle(IPC.CREATE_TASK, async (_event, data: { title: string; description?: string; status?: string; priority?: string; due_date?: string | null; category_id?: number | null }) => {
-    return tasksRepo.createTask(data)
+    const task = tasksRepo.createTask(data)
+    reconcileTaskReminder(task)
+    return task
   })
 
   ipcMain.handle(IPC.UPDATE_TASK, async (_event, id: number, data: { title?: string; description?: string; status?: string; priority?: string; due_date?: string | null; category_id?: number | null }) => {
-    return tasksRepo.updateTask(id, data)
+    const task = tasksRepo.updateTask(id, data)
+    reconcileTaskReminder(task)
+    return task
   })
 
   ipcMain.handle(IPC.DELETE_TASK, async (_event, id: number) => {
     tasksRepo.deleteTask(id)
+    // Only the auto-created reminder goes. A reminder the user set by hand on this
+    // task is theirs; `entity_id` simply stops resolving to a title.
+    try {
+      if (removeTaskAutoReminder(id) > 0) rescheduleNow()
+    } catch (err) {
+      console.error(`[reminders] could not clean up reminders for task ${id}: ${(err as Error).message}`)
+    }
   })
 
   ipcMain.handle(IPC.REORDER_TASK, async (_event, id: number, status: TaskStatus, sortOrder: number) => {

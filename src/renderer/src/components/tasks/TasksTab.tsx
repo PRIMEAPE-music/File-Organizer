@@ -56,6 +56,8 @@ export default function TasksTab({ sidebarCollapsed = false }: TasksTabProps) {
     due_date: string | null
     category_id: number | null
     tagIds: number[]
+    remindMe: boolean
+    remindLeadMin: number
   }) => {
     if (taskModal?.mode === 'edit') {
       const task = taskModal.task
@@ -77,6 +79,9 @@ export default function TasksTab({ sidebarCollapsed = false }: TasksTabProps) {
       for (const tagId of oldTagIds) {
         if (!newTagIds.has(tagId)) await removeTaskTag(task.id, tagId)
       }
+
+      // After the task write, so the reminder is derived from the saved due date.
+      await window.api.setTaskReminder(updated.id, data.remindMe, data.remindLeadMin)
     } else {
       const created = await createTask({
         title: data.title,
@@ -88,6 +93,9 @@ export default function TasksTab({ sidebarCollapsed = false }: TasksTabProps) {
       })
       for (const tagId of data.tagIds) {
         await addTaskTag(created.id, tagId)
+      }
+      if (data.remindMe) {
+        await window.api.setTaskReminder(created.id, true, data.remindLeadMin)
       }
     }
     setTaskModal(null)

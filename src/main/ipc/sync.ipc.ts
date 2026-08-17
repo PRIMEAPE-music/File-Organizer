@@ -13,6 +13,7 @@ import {
   importData,
   updateCurrentPrefs
 } from '../services/sync.service'
+import { rescheduleNow } from '../services/reminder.service'
 
 export function registerSyncHandlers(): void {
   ipcMain.handle(IPC.SYNC_GET_CONFIG, (): SyncConfig => {
@@ -46,12 +47,18 @@ export function registerSyncHandlers(): void {
   })
 
   ipcMain.handle(IPC.SYNC_IMPORT, () => {
-    return importData()
+    const result = importData()
+    // Imported reminder definitions have no occurrences yet on this machine.
+    // Re-deriving now means a reminder that arrived over the wire is live
+    // immediately instead of waiting for the next horizon top-up.
+    rescheduleNow()
+    return result
   })
 
   // Sync Now: import if remote is newer, then export — unless the read failed.
   ipcMain.handle(IPC.SYNC_NOW, (_e, prefs: SyncPreferences) => {
     const { result: importResult, preferences } = importData()
+    rescheduleNow()
 
     // Never publish over a payload we could not read. Our snapshot is stale
     // relative to a remote we failed to merge, so exporting would drop whatever

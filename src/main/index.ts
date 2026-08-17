@@ -10,7 +10,6 @@ import {
   dialog
 } from 'electron'
 import path from 'path'
-import fs from 'fs'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { getDb, closeDb } from './db/database'
 import { registerFolderHandlers } from './ipc/folders.ipc'
@@ -24,6 +23,9 @@ import { registerTaskHandlers } from './ipc/tasks.ipc'
 import { registerDragHandlers } from './ipc/drag.ipc'
 import { registerSyncHandlers } from './ipc/sync.ipc'
 import { registerAppPrefsHandlers } from './ipc/app-prefs.ipc'
+import { registerReminderHandlers } from './ipc/reminders.ipc'
+import * as reminderService from './services/reminder.service'
+import { pruneOrphanedAutoReminders } from './db/repositories/reminders.repo'
 import { shouldAutoImport, importData, exportData, getCurrentPrefs } from './services/sync.service'
 import { startWatching, stopWatching, setChangeCallback } from './services/watcher.service'
 import {
@@ -36,6 +38,7 @@ import {
 } from './services/app-prefs.service'
 import { getAllFolders } from './db/repositories/folders.repo'
 import { loadJson, writeJsonAtomic } from './utils/safe-fs'
+import { resolveResourcePath } from './utils/resources'
 import {
   guardWrite,
   registerPersistenceHandlers,
@@ -476,39 +479,38 @@ function createWindow(): void {
 // ─── Tray ───
 
 /**
- * Resolve a file under `resources/`. Packaged, electron-builder's
- * `extraResources` maps `resources/` → `resources/` inside the app resources
- * dir. In dev, main bundles to `out/main/`, so the repo copy is two levels up.
- * Candidates are probed with existsSync rather than assumed.
+ * How many occurrences are firing or overdue-unacknowledged right now.
+ *
+ * Mirrored here (rather than queried on demand) because both the tray icon and
+ * the tray menu need it, and the menu is rebuilt from a synchronous callback.
  */
-function resolveResourcePath(fileName: string): string | null {
-  const candidates = app.isPackaged
-    ? [
-        path.join(process.resourcesPath, 'resources', fileName),
-        path.join(process.resourcesPath, fileName)
-      ]
-    : [
-        path.join(__dirname, '../../resources', fileName),
-        path.join(app.getAppPath(), 'resources', fileName)
-      ]
-
-  for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) return candidate
-  }
-  console.error(`[tray] resource not found: ${fileName} (tried ${candidates.join(', ')})`)
-  return null
-}
+let reminderFiringCount = 0
 
 /**
- * Built fresh each time so the "Start with Windows" checkbox reflects real
- * state. Extend here — a later task adds "Snooze all reminders".
+ * Built fresh each time so the "Start with Windows" checkbox reflects real state
+ * and the snooze item appears only when there is something to snooze.
  */
 function buildTrayMenu(): Menu {
-  return Menu.buildFromTemplate([
+  const template: Electron.MenuItemConstructorOptions[] = [
     {
       label: 'Show File Organizer',
       click: () => revealWindow()
-    },
+    }
+  ]
+
+  if (reminderFiringCount > 0) {
+    template.push(
+      { type: 'separator' },
+      {
+        label: `Snooze all reminders (15m)${reminderFiringCount > 1 ? ` — ${reminderFiringCount}` : ''}`,
+        click: () => {
+          reminderService.snoozeAllFiring(15)
+        }
+      }
+    )
+  }
+
+  template.push(
     { type: 'separator' },
     {
       label: 'Start with Windows',
@@ -527,11 +529,56 @@ function buildTrayMenu(): Menu {
         app.quit()
       }
     }
-  ])
+  )
+
+  return Menu.buildFromTemplate(template)
 }
 
 function refreshTrayMenu(): void {
   tray?.setContextMenu(buildTrayMenu())
+}
+
+/** Icons are read once each: nativeImage decoding on every state flip is waste. */
+const trayIconCache = new Map<string, Electron.NativeImage | null>()
+
+function trayIcon(fileName: string): Electron.NativeImage | null {
+  const cached = trayIconCache.get(fileName)
+  if (cached !== undefined) return cached
+
+  let image: Electron.NativeImage | null = null
+  const iconPath = resolveResourcePath(fileName)
+  if (iconPath) {
+    const candidate = nativeImage.createFromPath(iconPath)
+    if (candidate.isEmpty()) {
+      console.error(`[tray] icon at ${iconPath} could not be decoded`)
+    } else {
+      image = candidate
+    }
+  }
+  trayIconCache.set(fileName, image)
+  return image
+}
+
+/**
+ * Reflect reminder state in the notification area: amber icon plus a count in the
+ * tooltip while anything is unacknowledged, back to normal once it is clear.
+ *
+ * This is the only always-visible signal that a reminder fired while the window
+ * was hidden — a toast that Focus Assist swallowed leaves no other trace.
+ */
+function applyReminderTrayState(count: number): void {
+  reminderFiringCount = count
+  if (!tray || tray.isDestroyed()) return
+
+  const icon = trayIcon(count > 0 ? 'tray-icon-alert.png' : 'tray-icon.png')
+  if (icon) tray.setImage(icon)
+
+  tray.setToolTip(
+    count === 0
+      ? 'File Organizer'
+      : `File Organizer — ${count} reminder${count === 1 ? '' : 's'} waiting`
+  )
+  refreshTrayMenu()
 }
 
 /**
@@ -545,14 +592,8 @@ function canHideToTray(): boolean {
 
 /** Returns false if no tray icon could be created; the caller must react. */
 function createTray(): boolean {
-  const iconPath = resolveResourcePath('tray-icon.png')
-  if (!iconPath) return false
-
-  const icon = nativeImage.createFromPath(iconPath)
-  if (icon.isEmpty()) {
-    console.error(`[tray] icon at ${iconPath} could not be decoded`)
-    return false
-  }
+  const icon = trayIcon(reminderFiringCount > 0 ? 'tray-icon-alert.png' : 'tray-icon.png')
+  if (!icon) return false
 
   try {
     tray = new Tray(icon)
@@ -562,8 +603,9 @@ function createTray(): boolean {
     return false
   }
 
-  tray.setToolTip('File Organizer')
-  refreshTrayMenu()
+  // Seeds icon, tooltip and menu from whatever reminder state already exists —
+  // the scheduler may have started (and fired) before the tray was created.
+  applyReminderTrayState(reminderFiringCount)
 
   // A Windows double-click emits click, click, double-click. Collapse that
   // storm so the window doesn't flap.
@@ -690,6 +732,11 @@ function runTeardown(): void {
   teardownStep('unregister global shortcuts', () => globalShortcut.unregisterAll())
   teardownStep('save window settings', () => saveSettings())
   teardownStep('stop file watcher', () => stopWatching())
+  // First among the stoppers, and not optional: alert windows are
+  // `closable: false`, so one left standing would stop `app.quit()` from ever
+  // completing. stop() destroys them. Wrapped like every other step, so a throw
+  // in the scheduler cannot cost us closeDb() or the final export.
+  teardownStep('stop reminder scheduler', () => reminderService.stop())
   // The final automatic export. Exactly once per quit, courtesy of teardownDone.
   teardownStep('final sync export', () => runAutoExport('quit'))
 }
@@ -703,6 +750,13 @@ function runTeardown(): void {
 if (is.dev) {
   app.setPath('userData', app.getPath('userData') + '-dev')
 }
+
+// Reminder sounds are played by the alert window, and Chromium's default autoplay
+// policy requires a user gesture in the page first — which an alert that appears
+// on its own can never have. Without this the blackout tier would be silent,
+// which is most of what makes it a blackout. Must be set before app ready. The app
+// plays no other media, so this widens nothing else.
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
 
 // One instance only. Two would mean duplicate notifications and two writers on
 // a single SQLite file.
@@ -757,6 +811,7 @@ function bootstrap(): void {
     registerWindowHandlers()
     registerDragHandlers()
     registerSyncHandlers()
+    registerReminderHandlers()
     registerPersistenceHandlers()
     // Tray checkbox mirrors these prefs, so rebuild the menu when they change.
     registerAppPrefsHandlers(() => refreshTrayMenu())
@@ -791,6 +846,28 @@ function bootstrap(): void {
           'File Organizer. Use the tray icon instead.'
       )
     }
+
+    // ─── Reminders ───
+    //
+    // Started after the window exists, because the very first tick can fire a
+    // catch-up alert and `reveal` has to have something to reveal.
+    reminderService.initReminderService({
+      reveal: () => revealWindow(),
+      onFiringCountChanged: (count) => applyReminderTrayState(count),
+      onRemindersChanged: () => sendToRenderer(IPC.REMINDERS_CHANGED)
+    })
+
+    // Auto-created reminders whose task is gone — deleted on this machine, or
+    // arriving from sync for a task that never existed here. Hand-made reminders
+    // are never touched.
+    try {
+      const pruned = pruneOrphanedAutoReminders()
+      if (pruned > 0) console.log(`[reminders] pruned ${pruned} orphaned auto reminder(s)`)
+    } catch (err) {
+      console.error(`[reminders] prune failed: ${(err as Error).message}`)
+    }
+
+    reminderService.start()
 
     // Start watching all previously added folders. This deliberately keeps
     // running while the app sits in the tray — background file tracking is the

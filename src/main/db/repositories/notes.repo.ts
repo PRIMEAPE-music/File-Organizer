@@ -1,4 +1,5 @@
 import { getDb } from '../database'
+import { NOW_MS_EXPR } from '../timestamp'
 import type { Note, NoteWithMeta, NoteFilterState, NoteCategory, NoteTag } from '../../../shared/types'
 
 function enrichNote(note: Note): NoteWithMeta {
@@ -52,13 +53,22 @@ export function getNoteById(id: number): NoteWithMeta | undefined {
 
 export function createNote(title: string, content: string): NoteWithMeta {
   const db = getDb()
-  const info = db.prepare('INSERT INTO notes (title, content) VALUES (?, ?)').run(title, content)
+  // Timestamps are written explicitly rather than left to the column defaults:
+  // the defaults are second-resolution, and two notes created in the same second
+  // used to collide in the sync merge and overwrite each other (see NOW_MS_EXPR).
+  // `sync_id` is filled by the trigger from migration 3.
+  const info = db
+    .prepare(
+      `INSERT INTO notes (title, content, created_at, updated_at)
+       VALUES (?, ?, ${NOW_MS_EXPR}, ${NOW_MS_EXPR})`
+    )
+    .run(title, content)
   return enrichNote(db.prepare('SELECT * FROM notes WHERE id = ?').get(info.lastInsertRowid) as Note)
 }
 
 export function updateNote(id: number, title: string, content: string): NoteWithMeta {
   const db = getDb()
-  db.prepare("UPDATE notes SET title = ?, content = ?, updated_at = datetime('now') WHERE id = ?").run(title, content, id)
+  db.prepare(`UPDATE notes SET title = ?, content = ?, updated_at = ${NOW_MS_EXPR} WHERE id = ?`).run(title, content, id)
   return enrichNote(db.prepare('SELECT * FROM notes WHERE id = ?').get(id) as Note)
 }
 

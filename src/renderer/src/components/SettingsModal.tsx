@@ -1,9 +1,38 @@
 import { useState, useEffect } from 'react'
 import { X, Settings as SettingsIcon } from 'lucide-react'
-import type { AppPreferences } from '../../../shared/types'
+import type { AppPreferences, ReminderIntensity, TaskPriority } from '../../../shared/types'
 
 interface Props {
   onClose: () => void
+}
+
+const PRIORITY_OPTIONS: { value: TaskPriority; label: string }[] = [
+  { value: 'low', label: 'Low and above (all tasks)' },
+  { value: 'medium', label: 'Medium and above' },
+  { value: 'high', label: 'High and above' },
+  { value: 'urgent', label: 'Urgent only' }
+]
+
+const INTENSITY_OPTIONS: { value: ReminderIntensity; label: string }[] = [
+  { value: 'toast', label: 'Toast — a notification' },
+  { value: 'popup', label: 'Popup — always-on-top window' },
+  { value: 'blackout', label: 'Blackout — covers every screen' }
+]
+
+interface FieldRowProps {
+  label: string
+  hint: string
+  children: React.ReactNode
+}
+
+function FieldRow({ label, hint, children }: FieldRowProps) {
+  return (
+    <div>
+      <div className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{label}</div>
+      <div className="text-xs text-zinc-500 mt-0.5 mb-1.5">{hint}</div>
+      {children}
+    </div>
+  )
 }
 
 interface ToggleRowProps {
@@ -39,6 +68,9 @@ function ToggleRow({ label, hint, checked, onChange }: ToggleRowProps) {
   )
 }
 
+const selectClass =
+  'w-full px-3 py-2 text-sm rounded-md border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-900 focus:outline-none focus:ring-2 focus:ring-accent/50'
+
 export default function SettingsModal({ onClose }: Props) {
   const [prefs, setPrefs] = useState<AppPreferences | null>(null)
 
@@ -57,7 +89,7 @@ export default function SettingsModal({ onClose }: Props) {
       onClick={onClose}
     >
       <div
-        className="bg-white dark:bg-zinc-900 rounded-lg border border-zinc-200 dark:border-zinc-700 w-[480px] shadow-xl"
+        className="bg-white dark:bg-zinc-900 rounded-lg border border-zinc-200 dark:border-zinc-700 w-[480px] max-h-[85vh] overflow-y-auto shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -95,6 +127,90 @@ export default function SettingsModal({ onClose }: Props) {
                 Right-click the tray icon to show the window or quit. Ctrl+Shift+Space brings it
                 back at any time.
               </p>
+
+              <div className="border-t border-zinc-200 dark:border-zinc-700 pt-4 space-y-4">
+                <div className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                  Reminders
+                </div>
+
+                <FieldRow
+                  label="Automatic task reminders"
+                  hint="Tasks at or above this priority with a future due date get a reminder automatically. Existing tasks are never backfilled."
+                >
+                  <select
+                    value={prefs.reminderPriorityThreshold}
+                    onChange={(e) =>
+                      patch({ reminderPriorityThreshold: e.target.value as TaskPriority })
+                    }
+                    className={selectClass}
+                  >
+                    {PRIORITY_OPTIONS.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                </FieldRow>
+
+                <FieldRow
+                  label="Default lead time"
+                  hint="Minutes before the due date an automatic reminder fires. A due date with no time is treated as 9am that day."
+                >
+                  <input
+                    type="number"
+                    min={0}
+                    max={43200}
+                    value={prefs.reminderDefaultLeadMin}
+                    onChange={(e) =>
+                      patch({ reminderDefaultLeadMin: Math.max(0, Number(e.target.value) || 0) })
+                    }
+                    className={selectClass}
+                  />
+                </FieldRow>
+
+                <FieldRow
+                  label="Default intensity"
+                  hint="Where a new reminder starts on the ladder. Escalation is what makes it louder."
+                >
+                  <select
+                    value={prefs.reminderDefaultIntensity}
+                    onChange={(e) =>
+                      patch({ reminderDefaultIntensity: e.target.value as ReminderIntensity })
+                    }
+                    className={selectClass}
+                  >
+                    {INTENSITY_OPTIONS.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                </FieldRow>
+
+                <FieldRow
+                  label="Default escalation"
+                  hint="Minutes an unacknowledged reminder waits before climbing a rung. Empty means never escalate."
+                >
+                  <input
+                    type="number"
+                    min={1}
+                    max={1440}
+                    placeholder="never"
+                    value={prefs.reminderDefaultEscalateMin ?? ''}
+                    onChange={(e) => {
+                      const raw = e.target.value.trim()
+                      const parsed = Number(raw)
+                      patch({
+                        reminderDefaultEscalateMin:
+                          raw === '' || !Number.isFinite(parsed) || parsed <= 0
+                            ? null
+                            : Math.round(parsed)
+                      })
+                    }}
+                    className={selectClass}
+                  />
+                </FieldRow>
+              </div>
             </>
           )}
         </div>
