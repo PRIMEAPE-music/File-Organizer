@@ -20,6 +20,12 @@ import type {
 const PRIORITIES: TaskPriority[] = ['low', 'medium', 'high', 'urgent']
 const INTENSITIES: ReminderIntensity[] = ['toast', 'popup', 'blackout']
 const FREQUENCIES = ['daily', 'weekly', 'monthly', 'yearly']
+const TASK_STATUSES = ['todo', 'in_progress', 'done']
+
+// Column defaults from migration 1, repeated here because the importer's upserts
+// pass `color` explicitly (a column default only applies to an omitted column).
+const DEFAULT_CATEGORY_COLOR = '#6366f1'
+const DEFAULT_TAG_COLOR = '#8b5cf6'
 
 // ─── Internal Types ───────────────────────────────────────────────────────────
 
@@ -42,7 +48,7 @@ interface SyncPayload {
    * machine's "I dealt with this" silently cancel the alert on the machine the
    * user is actually sitting at, which is the opposite of what a reminder is for.
    *
-   * OPTIONAL ON READ (`data.reminders ?? []`). A machine still running the older
+   * OPTIONAL ON READ (see `rowsOf` in the importer). A machine still running the older
    * build writes a payload with no `reminders` key at all, and during a staged
    * rollout that must neither throw nor be read as "the remote has zero
    * reminders, delete mine". That is also why `version` stays at 1: bumping it
@@ -631,6 +637,214 @@ function normaliseSyncReminder(raw: unknown): NormalisedReminder | null {
   }
 }
 
+// ─── Notes / tasks / taxonomy payload validation ───────────────────────────────
+
+/**
+ * The same treatment `normaliseSyncReminder` gets, for every other entity in the
+ * payload.
+ *
+ * WHY IT CANNOT BE REMINDER-ONLY: the whole payload is imported in ONE
+ * transaction, so any throw from any row rolls back *everything* — categories,
+ * tags, notes, tasks, favorites, file assignments and the reminders that merged
+ * perfectly. And notes/tasks are just as exposed as reminders were:
+ *
+ *  - `noteInsert.run(undefined, …)` throws TypeError from better-sqlite3 ("can only
+ *    bind numbers, strings, bigints, buffers, and null") for a missing field,
+ *  - a null `created_at` throws NOT NULL, exactly as it did for reminders,
+ *  - a non-string `title` (an object, say) throws TypeError on bind,
+ *  - `for (const c of data.categories)` throws TypeError when a section is absent.
+ *
+ * One bad row must cost one row. Everything below therefore skips-and-counts
+ * rather than throwing, and the counts are reported through the persistence
+ * banner after the commit.
+ *
+ * What each normaliser REQUIRES is deliberately narrow — only the fields that are
+ * NOT NULL in the schema and/or carry identity:
+ *  - taxonomy (categories/tags, all six tables): `name`, which is the UNIQUE merge
+ *    key. `color` is cosmetic and falls back to the column default.
+ *  - notes/tasks: `created_at`, which is NOT NULL and is the documented fallback
+ *    merge key. `title` is NOT required: unlike a reminder, a note or task with an
+ *    empty title is a real, editable row (the notes list renders 'Untitled' for
+ *    one), and throwing away text the user wrote because the title field arrived
+ *    wrong is the more destructive choice. `updated_at` falls back to `created_at`,
+ *    which loses last-write-wins against the local copy — the conservative
+ *    direction, same as reminders.
+ *  - file assignments / favorites: `path`, with no local file no assignment.
+ */
+
+/** Non-empty string, trimmed, or null. */
+function usableString(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  return trimmed ? trimmed : null
+}
+
+/** The non-empty strings out of what should have been an array of names. */
+function usableStrings(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  const out: string[] = []
+  for (const entry of value) {
+    const name = usableString(entry)
+    if (name) out.push(name)
+  }
+  return out
+}
+
+/**
+ * `#rgb` / `#rrggbb`, the only shapes this app ever writes.
+ *
+ * Anything else becomes the column default rather than being stored verbatim: the
+ * value is interpolated straight into `style={{ backgroundColor }}` and
+ * concatenated with an alpha suffix (`color + '25'`) in the renderer, so a
+ * non-colour string is a silently invisible tag chip, not a stored curiosity.
+ */
+function usableColor(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  return /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(trimmed) ? trimmed : null
+}
+
+interface NormalisedTaxonomy {
+  name: string
+  color: string
+}
+
+/** Categories and tags, for files, notes and tasks alike — same two columns. */
+function normaliseSyncTaxonomy(raw: unknown, fallbackColor: string): NormalisedTaxonomy | null {
+  if (!raw || typeof raw !== 'object') return null
+  const t = raw as Record<string, unknown>
+
+  // The UNIQUE merge key. No name, no row — there is nothing to merge on and
+  // nothing the user could recognise.
+  const name = usableString(t.name)
+  if (!name) return null
+
+  return { name, color: usableColor(t.color) ?? fallbackColor }
+}
+
+interface NormalisedAssignment {
+  path: string
+  categoryName: string | null
+  tagNames: string[]
+}
+
+function normaliseSyncAssignment(raw: unknown): NormalisedAssignment | null {
+  if (!raw || typeof raw !== 'object') return null
+  const a = raw as Record<string, unknown>
+
+  const assignedPath = usableString(a.path)
+  if (!assignedPath) return null
+
+  return {
+    path: assignedPath,
+    categoryName: usableString(a.categoryName),
+    tagNames: usableStrings(a.tagNames)
+  }
+}
+
+/** Every column the note importer writes or merges on, checked and coerced. */
+interface NormalisedNote {
+  sync_id: string | null
+  title: string
+  content: string
+  categoryName: string | null
+  tagNames: string[]
+  created_at: string
+  updated_at: string
+}
+
+function normaliseSyncNote(raw: unknown): NormalisedNote | null {
+  if (!raw || typeof raw !== 'object') return null
+  const n = raw as Record<string, unknown>
+
+  // NOT NULL, and the fallback merge key. Unusable here means unmergeable.
+  const createdAt = usableTimestamp(n.created_at)
+  if (!createdAt) return null
+
+  return {
+    sync_id: usableString(n.sync_id),
+    // Not trimmed: whitespace in a title the user typed is theirs to keep.
+    title: typeof n.title === 'string' ? n.title : '',
+    content: typeof n.content === 'string' ? n.content : '',
+    categoryName: usableString(n.categoryName),
+    tagNames: usableStrings(n.tagNames),
+    created_at: createdAt,
+    updated_at: usableTimestamp(n.updated_at) ?? createdAt
+  }
+}
+
+/** Every column the task importer writes or merges on, checked and coerced. */
+interface NormalisedTask {
+  sync_id: string | null
+  title: string
+  description: string
+  status: string
+  priority: string
+  due_date: string | null
+  sort_order: number
+  categoryName: string | null
+  tagNames: string[]
+  created_at: string
+  updated_at: string
+}
+
+function normaliseSyncTask(raw: unknown): NormalisedTask | null {
+  if (!raw || typeof raw !== 'object') return null
+  const t = raw as Record<string, unknown>
+
+  const createdAt = usableTimestamp(t.created_at)
+  if (!createdAt) return null
+
+  return {
+    sync_id: usableString(t.sync_id),
+    title: typeof t.title === 'string' ? t.title : '',
+    description: typeof t.description === 'string' ? t.description : '',
+    // Neither column has a CHECK constraint, so an off-list value would store
+    // happily and then be invisible: a task whose status is not one of the three
+    // board columns appears in none of them, and priority is what the reminder
+    // automation compares against its threshold. Coerced to the column defaults.
+    status: typeof t.status === 'string' && TASK_STATUSES.includes(t.status) ? t.status : 'todo',
+    priority: PRIORITIES.includes(t.priority as TaskPriority) ? (t.priority as string) : 'medium',
+    // Nullable column. A garbage date becomes "no due date" rather than a value
+    // the task views and the reminder lead-time maths would both choke on.
+    due_date: usableTimestamp(t.due_date),
+    // REAL, so a fraction is fine; anything non-finite is not.
+    sort_order:
+      typeof t.sort_order === 'number' && Number.isFinite(t.sort_order) ? t.sort_order : 0,
+    categoryName: usableString(t.categoryName),
+    tagNames: usableStrings(t.tagNames),
+    created_at: createdAt,
+    updated_at: usableTimestamp(t.updated_at) ?? createdAt
+  }
+}
+
+/**
+ * Singular / plural label per payload section, for the skipped-rows banner. Also
+ * the canonical section order, so the message reads the same whatever order the
+ * damage appeared in.
+ */
+const SECTION_LABELS = {
+  categories: ['category', 'categories'],
+  tags: ['tag', 'tags'],
+  fileAssignments: ['file assignment', 'file assignments'],
+  favorites: ['favorite', 'favorites'],
+  noteCategories: ['note category', 'note categories'],
+  noteTags: ['note tag', 'note tags'],
+  notes: ['note', 'notes'],
+  taskCategories: ['task category', 'task categories'],
+  taskTags: ['task tag', 'task tags'],
+  tasks: ['task', 'tasks'],
+  reminders: ['reminder', 'reminders']
+} as const
+
+type PayloadSection = keyof typeof SECTION_LABELS
+
+/** "a" / "a and b" / "a, b and c" */
+function joinList(parts: string[]): string {
+  if (parts.length <= 1) return parts[0] ?? ''
+  return `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`
+}
+
 // ─── Import ──────────────────────────────────────────────────────────────────
 
 export function importData(): { result: SyncResult; preferences: SyncPreferences | null } {
@@ -664,17 +878,59 @@ export function importData(): { result: SyncResult; preferences: SyncPreferences
 
     const db = getDb()
 
-    /** Reminders the payload described but we could not use. Reported below. */
-    let malformedReminders = 0
+    /**
+     * Rows the payload described but we could not use, per section. Counted here,
+     * reported through the persistence banner after the commit — one bad row is
+     * skipped and surfaced, never silent and never fatal.
+     */
+    const skipped = new Map<PayloadSection, number>()
+    const skip = (section: PayloadSection): void => {
+      skipped.set(section, (skipped.get(section) ?? 0) + 1)
+    }
+
+    /**
+     * Sections that were not arrays at all, where no row count is knowable.
+     * Reported separately.
+     */
+    const badSections: PayloadSection[] = []
+
+    /**
+     * Read one payload section as rows.
+     *
+     * `undefined` / `null` means "the machine that wrote this has no such section"
+     * — the same staged-rollout tolerance `data.reminders ?? []` already had, and
+     * it must mean "nothing to merge", never a throw. Anything else present but
+     * not an array is damage, and is reported rather than passed to `for…of`,
+     * which would take the whole transaction down with it.
+     */
+    const rowsOf = (section: PayloadSection, value: unknown): unknown[] => {
+      if (Array.isArray(value)) return value
+      if (value !== undefined && value !== null) badSections.push(section)
+      return []
+    }
 
     db.transaction(() => {
       // Categories
       const catUpsert = db.prepare('INSERT INTO categories (name, color) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET color = excluded.color')
-      for (const c of data.categories) catUpsert.run(c.name, c.color)
+      for (const raw of rowsOf('categories', data.categories)) {
+        const c = normaliseSyncTaxonomy(raw, DEFAULT_CATEGORY_COLOR)
+        if (!c) {
+          skip('categories')
+          continue
+        }
+        catUpsert.run(c.name, c.color)
+      }
 
       // Tags
       const tagUpsert = db.prepare('INSERT INTO tags (name, color) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET color = excluded.color')
-      for (const t of data.tags) tagUpsert.run(t.name, t.color)
+      for (const raw of rowsOf('tags', data.tags)) {
+        const t = normaliseSyncTaxonomy(raw, DEFAULT_TAG_COLOR)
+        if (!t) {
+          skip('tags')
+          continue
+        }
+        tagUpsert.run(t.name, t.color)
+      }
 
       // File assignments — apply only to files that exist locally
       const getFileId = db.prepare('SELECT id FROM files WHERE path = ?')
@@ -684,8 +940,15 @@ export function importData(): { result: SyncResult; preferences: SyncPreferences
       const clearFileTags = db.prepare('DELETE FROM file_tags WHERE file_id = ?')
       const addFileTag = db.prepare('INSERT OR IGNORE INTO file_tags (file_id, tag_id) VALUES (?, ?)')
 
-      for (const fa of data.fileAssignments) {
+      for (const raw of rowsOf('fileAssignments', data.fileAssignments)) {
+        const fa = normaliseSyncAssignment(raw)
+        if (!fa) {
+          skip('fileAssignments')
+          continue
+        }
         const file = getFileId.get(fa.path) as { id: number } | undefined
+        // Not counted as skipped: a file the payload knows and this machine does
+        // not is the normal case on a share, not damage.
         if (!file) continue
         const cat = fa.categoryName ? (getCatId.get(fa.categoryName) as { id: number } | undefined) : null
         setFileCat.run(cat?.id ?? null, file.id)
@@ -698,18 +961,37 @@ export function importData(): { result: SyncResult; preferences: SyncPreferences
 
       // Favorites
       const addFav = db.prepare('INSERT OR IGNORE INTO favorites (file_id) VALUES (?)')
-      for (const favPath of data.favorites) {
+      for (const raw of rowsOf('favorites', data.favorites)) {
+        const favPath = usableString(raw)
+        if (!favPath) {
+          skip('favorites')
+          continue
+        }
         const file = getFileId.get(favPath) as { id: number } | undefined
         if (file) addFav.run(file.id)
       }
 
       // Note categories
       const noteCatUpsert = db.prepare('INSERT INTO note_categories (name, color) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET color = excluded.color')
-      for (const nc of data.noteCategories) noteCatUpsert.run(nc.name, nc.color)
+      for (const raw of rowsOf('noteCategories', data.noteCategories)) {
+        const nc = normaliseSyncTaxonomy(raw, DEFAULT_CATEGORY_COLOR)
+        if (!nc) {
+          skip('noteCategories')
+          continue
+        }
+        noteCatUpsert.run(nc.name, nc.color)
+      }
 
       // Note tags
       const noteTagUpsert = db.prepare('INSERT INTO note_tags (name, color) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET color = excluded.color')
-      for (const nt of data.noteTags) noteTagUpsert.run(nt.name, nt.color)
+      for (const raw of rowsOf('noteTags', data.noteTags)) {
+        const nt = normaliseSyncTaxonomy(raw, DEFAULT_TAG_COLOR)
+        if (!nt) {
+          skip('noteTags')
+          continue
+        }
+        noteTagUpsert.run(nt.name, nt.color)
+      }
 
       // Notes — merge on sync_id (created_at as the documented fallback; never
       // delete local-only notes). See the SyncNote comment for what the old
@@ -742,7 +1024,7 @@ export function importData(): { result: SyncResult; preferences: SyncPreferences
       const matchLocalRow = (
         bySyncId: { get: (v: string) => unknown },
         byCreatedAt: { all: (v: string) => unknown[] },
-        syncId: string | undefined,
+        syncId: string | null,
         createdAt: string,
         claimed: Set<number>
       ): { row: { id: number; updated_at: string } | undefined; matchedBySyncId: boolean } => {
@@ -762,7 +1044,14 @@ export function importData(): { result: SyncResult; preferences: SyncPreferences
         return { row, matchedBySyncId: false }
       }
 
-      for (const note of data.notes) {
+      for (const raw of rowsOf('notes', data.notes)) {
+        // ONE BAD NOTE MUST NOT COST THE WHOLE IMPORT — see the normalisers above.
+        const note = normaliseSyncNote(raw)
+        if (!note) {
+          skip('notes')
+          continue
+        }
+
         const cat = note.categoryName ? (getNoteCatId.get(note.categoryName) as { id: number } | undefined) : null
         const { row: existing, matchedBySyncId } = matchLocalRow(
           getNoteBySyncId, getNoteByCreatedAt, note.sync_id, note.created_at, claimedNotes
@@ -779,7 +1068,7 @@ export function importData(): { result: SyncResult; preferences: SyncPreferences
           if (!matchedBySyncId && note.sync_id) adoptNoteSyncId.run(note.sync_id, existing.id)
           noteId = existing.id
         } else {
-          const info = noteInsert.run(note.sync_id ?? null, note.title, note.content, cat?.id ?? null, note.created_at, note.updated_at)
+          const info = noteInsert.run(note.sync_id, note.title, note.content, cat?.id ?? null, note.created_at, note.updated_at)
           noteId = info.lastInsertRowid as number
           claimedNotes.add(noteId)
         }
@@ -792,11 +1081,25 @@ export function importData(): { result: SyncResult; preferences: SyncPreferences
 
       // Task categories
       const taskCatUpsert = db.prepare('INSERT INTO task_categories (name, color) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET color = excluded.color')
-      for (const tc of data.taskCategories) taskCatUpsert.run(tc.name, tc.color)
+      for (const raw of rowsOf('taskCategories', data.taskCategories)) {
+        const tc = normaliseSyncTaxonomy(raw, DEFAULT_CATEGORY_COLOR)
+        if (!tc) {
+          skip('taskCategories')
+          continue
+        }
+        taskCatUpsert.run(tc.name, tc.color)
+      }
 
       // Task tags
       const taskTagUpsert = db.prepare('INSERT INTO task_tags (name, color) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET color = excluded.color')
-      for (const tt of data.taskTags) taskTagUpsert.run(tt.name, tt.color)
+      for (const raw of rowsOf('taskTags', data.taskTags)) {
+        const tt = normaliseSyncTaxonomy(raw, DEFAULT_TAG_COLOR)
+        if (!tt) {
+          skip('taskTags')
+          continue
+        }
+        taskTagUpsert.run(tt.name, tt.color)
+      }
 
       // Tasks — merge on sync_id, created_at as the fallback; never delete
       // local-only tasks.
@@ -818,7 +1121,13 @@ export function importData(): { result: SyncResult; preferences: SyncPreferences
       const clearTaskTags = db.prepare('DELETE FROM task_tag_map WHERE task_id = ?')
       const taskTagInsert = db.prepare('INSERT OR IGNORE INTO task_tag_map (task_id, tag_id) VALUES (?, ?)')
 
-      for (const task of data.tasks) {
+      for (const raw of rowsOf('tasks', data.tasks)) {
+        const task = normaliseSyncTask(raw)
+        if (!task) {
+          skip('tasks')
+          continue
+        }
+
         const cat = task.categoryName ? (getTaskCatId.get(task.categoryName) as { id: number } | undefined) : null
         const { row: existing, matchedBySyncId } = matchLocalRow(
           getTaskBySyncId, getTaskByCreatedAt, task.sync_id, task.created_at, claimedTasks
@@ -832,7 +1141,7 @@ export function importData(): { result: SyncResult; preferences: SyncPreferences
           taskId = existing.id
         } else {
           const info = taskInsert.run(
-            task.sync_id ?? null,
+            task.sync_id,
             task.title, task.description, task.status, task.priority,
             task.due_date, task.sort_order, cat?.id ?? null,
             task.created_at, task.updated_at
@@ -853,10 +1162,10 @@ export function importData(): { result: SyncResult; preferences: SyncPreferences
       // MUST come after tasks: a reminder's entity link is resolved through the
       // task rows this same transaction may have just inserted.
       //
-      // `?? []` is the staged-rollout guard: a payload written by the previous
+      // `rowsOf` is the staged-rollout guard: a payload written by the previous
       // build has no `reminders` key, and that has to mean "nothing to merge",
       // not a crash and not "the remote deleted them all".
-      const remoteReminders = data.reminders ?? []
+      const remoteReminders = rowsOf('reminders', data.reminders)
       if (remoteReminders.length > 0) {
         const getTaskIdBySyncId = db.prepare('SELECT id FROM tasks WHERE sync_id = ?')
         // Legacy: a payload from the build that exported the task's created_at.
@@ -907,7 +1216,7 @@ export function importData(): { result: SyncResult; preferences: SyncPreferences
           // skipped and counted, and the rest of the merge commits.
           const rem = normaliseSyncReminder(raw)
           if (!rem) {
-            malformedReminders++
+            skip('reminders')
             continue
           }
 
@@ -974,12 +1283,36 @@ export function importData(): { result: SyncResult; preferences: SyncPreferences
     // Surfaced, not swallowed: the merge succeeded, but the user should know some
     // of what the other machine sent could not be read. Uses the same banner
     // channel as every other persistence problem.
-    if (malformedReminders > 0) {
+    //
+    // One issue for all the skipped rows rather than one per entity type: a badly
+    // damaged payload would otherwise raise a stack of near-identical banners.
+    // Iterated in SECTION_LABELS order so the sentence is stable.
+    const skippedParts = (Object.keys(SECTION_LABELS) as PayloadSection[])
+      .map((section) => ({ section, count: skipped.get(section) ?? 0 }))
+      .filter(({ count }) => count > 0)
+      .map(({ section, count }) => `${count} ${SECTION_LABELS[section][count === 1 ? 0 : 1]}`)
+    const totalSkipped = [...skipped.values()].reduce((sum, count) => sum + count, 0)
+
+    if (totalSkipped > 0) {
       reportPersistenceIssue(
         'corrupt',
         filePath,
-        `${malformedReminders} reminder${malformedReminders === 1 ? '' : 's'} in the sync file ` +
-          `could not be read and ${malformedReminders === 1 ? 'was' : 'were'} skipped. ` +
+        `${joinList(skippedParts)} in the sync file ` +
+          `could not be read and ${totalSkipped === 1 ? 'was' : 'were'} skipped. ` +
+          'Everything else was imported.'
+      )
+    }
+
+    // A whole section that was not a list — no row count to report, but the same
+    // "we imported the rest" message.
+    if (badSections.length > 0) {
+      const one = badSections.length === 1
+      reportPersistenceIssue(
+        'corrupt',
+        filePath,
+        `The ${joinList(badSections.map((section) => SECTION_LABELS[section][1]))} ` +
+          `section${one ? '' : 's'} of the sync file ` +
+          `could not be read and ${one ? 'was' : 'were'} skipped. ` +
           'Everything else was imported.'
       )
     }

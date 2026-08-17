@@ -3,6 +3,7 @@ import type { NoteFilterState, NoteSidebarView, NoteSortField, NoteWithMeta } fr
 import { useNotes } from '../../hooks/useNotes'
 import { useNoteCategories } from '../../hooks/useNoteCategories'
 import { useNoteTags } from '../../hooks/useNoteTags'
+import { useInFlight } from '../../hooks/useInFlight'
 import NoteSidebar from './NoteSidebar'
 import NoteList from './NoteList'
 import NoteEditor from './NoteEditor'
@@ -33,14 +34,16 @@ export default function NotesTab({ sidebarCollapsed = false }: NotesTabProps) {
     setFilter(f => ({ ...f, sidebarView: view }))
   }, [])
 
-  const handleCreateNote = useCallback(async () => {
-    try {
+  // Guarded: this used to fire the create IPC straight out of the click with no
+  // in-flight state, so a double-click on "New" made two notes.
+  const { inFlight: creatingNote, run: runCreateNote } = useInFlight('create note')
+
+  const handleCreateNote = useCallback(() => {
+    runCreateNote(async () => {
       const note = await createNote('Untitled', '')
       setSelectedNote(note)
-    } catch (err) {
-      console.error('Failed to create note:', err)
-    }
-  }, [createNote])
+    })
+  }, [createNote, runCreateNote])
 
   const handleSelectNote = useCallback((note: NoteWithMeta) => {
     setSelectedNote(note)
@@ -102,6 +105,7 @@ export default function NotesTab({ sidebarCollapsed = false }: NotesTabProps) {
         selectedNoteId={selectedNote?.id ?? null}
         onSelect={handleSelectNote}
         onCreateNote={handleCreateNote}
+        creatingNote={creatingNote}
         search={filter.search}
         onSearchChange={(search) => setFilter(f => ({ ...f, search }))}
         sortField={filter.sortField}

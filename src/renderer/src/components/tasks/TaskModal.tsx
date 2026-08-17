@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react'
 import { Bell, X } from 'lucide-react'
 import type { TaskWithMeta, TaskStatus, TaskPriority, TaskCategory, TaskTag } from '../../../../shared/types'
+import { useInFlight } from '../../hooks/useInFlight'
 
 interface Props {
   task?: TaskWithMeta | null
   categories: TaskCategory[]
   tags: TaskTag[]
+  /** Awaited, so the submit button can stay disabled until the write finishes. */
   onSave: (data: {
     title: string
     description: string
@@ -17,7 +19,7 @@ interface Props {
     /** "Remind me" — always a hand-made (auto_created = 0) reminder. */
     remindMe: boolean
     remindLeadMin: number
-  }) => void
+  }) => void | Promise<void>
   onClose: () => void
 }
 
@@ -50,6 +52,10 @@ export default function TaskModal({ task, categories, tags, onSave, onClose }: P
   const [remindLeadMin, setRemindLeadMin] = useState('0')
   const [hasAutoReminder, setHasAutoReminder] = useState(false)
 
+  // The modal is closed by the parent only after its save resolves, so without
+  // this a double-click on Create created the task twice.
+  const { inFlight: saving, run: runSave } = useInFlight('save task')
+
   useEffect(() => {
     if (!task) return
     let cancelled = false
@@ -76,17 +82,19 @@ export default function TaskModal({ task, categories, tags, onSave, onClose }: P
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     if (!title.trim()) return
-    onSave({
-      title: title.trim(),
-      description,
-      status,
-      priority,
-      due_date: dueDate || null,
-      category_id: categoryId,
-      tagIds: Array.from(selectedTagIds),
-      remindMe,
-      remindLeadMin: Math.max(0, Number(remindLeadMin) || 0)
-    })
+    runSave(() =>
+      onSave({
+        title: title.trim(),
+        description,
+        status,
+        priority,
+        due_date: dueDate || null,
+        category_id: categoryId,
+        tagIds: Array.from(selectedTagIds),
+        remindMe,
+        remindLeadMin: Math.max(0, Number(remindLeadMin) || 0)
+      })
+    )
   }
 
   return (
@@ -252,7 +260,7 @@ export default function TaskModal({ task, categories, tags, onSave, onClose }: P
             </button>
             <button
               type="submit"
-              disabled={!title.trim()}
+              disabled={!title.trim() || saving}
               className="px-3 py-1.5 text-sm rounded-md bg-accent text-white hover:bg-accent-hover disabled:opacity-50 transition-colors"
             >
               {task ? 'Save' : 'Create'}

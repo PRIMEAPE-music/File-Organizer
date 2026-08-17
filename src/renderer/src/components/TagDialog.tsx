@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { X } from 'lucide-react'
+import { useInFlight } from '../hooks/useInFlight'
 
 const PRESET_COLORS = [
   '#8b5cf6', '#6366f1', '#ec4899', '#ef4444',
@@ -10,18 +11,22 @@ const PRESET_COLORS = [
 interface Props {
   mode: 'create' | 'edit'
   initial?: { name: string; color: string }
-  onSave: (name: string, color: string) => void
+  /** Awaited, so the button can stay disabled until the write finishes. */
+  onSave: (name: string, color: string) => void | Promise<void>
   onClose: () => void
 }
 
 export default function TagDialog({ mode, initial, onSave, onClose }: Props) {
   const [name, setName] = useState(initial?.name ?? '')
   const [color, setColor] = useState(initial?.color ?? PRESET_COLORS[0])
+  // Same guard as CategoryDialog: the dialog outlives the click, so a
+  // double-click would otherwise submit twice.
+  const { inFlight: saving, run: runSave } = useInFlight('save tag')
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     if (!name.trim()) return
-    onSave(name.trim(), color)
+    runSave(() => onSave(name.trim(), color))
   }
 
   return (
@@ -78,7 +83,7 @@ export default function TagDialog({ mode, initial, onSave, onClose }: Props) {
             </button>
             <button
               type="submit"
-              disabled={!name.trim()}
+              disabled={!name.trim() || saving}
               className="px-3 py-1.5 text-sm rounded-md bg-accent text-white hover:bg-accent-hover disabled:opacity-50 transition-colors"
             >
               {mode === 'create' ? 'Create' : 'Save'}

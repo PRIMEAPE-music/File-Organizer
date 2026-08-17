@@ -7,6 +7,8 @@ interface Props {
   selectedNoteId: number | null
   onSelect: (note: NoteWithMeta) => void
   onCreateNote: () => void
+  /** A create is already in flight — see NotesTab. Keeps a double-click to one note. */
+  creatingNote?: boolean
   search: string
   onSearchChange: (s: string) => void
   sortField: NoteSortField
@@ -20,7 +22,7 @@ function stripHtml(html: string): string {
 }
 
 export default function NoteList({
-  notes, selectedNoteId, onSelect, onCreateNote,
+  notes, selectedNoteId, onSelect, onCreateNote, creatingNote = false,
   search, onSearchChange, sortField, onCycleSortField
 }: Props) {
   const sortLabel: Record<NoteSortField, string> = {
@@ -39,7 +41,8 @@ export default function NoteList({
           </button>
           <button
             onClick={onCreateNote}
-            className="flex items-center gap-1 px-2 py-1 text-xs rounded-md bg-accent text-white hover:bg-accent-hover transition-colors"
+            disabled={creatingNote}
+            className="flex items-center gap-1 px-2 py-1 text-xs rounded-md bg-accent text-white hover:bg-accent-hover disabled:opacity-50 disabled:cursor-default transition-colors"
           >
             <Plus className="w-3.5 h-3.5" />
             New

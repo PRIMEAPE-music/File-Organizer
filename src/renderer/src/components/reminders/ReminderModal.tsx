@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { X } from 'lucide-react'
+import { useInFlight } from '../../hooks/useInFlight'
 import { REMINDER_SOUND_FILES, type ReminderSoundFile } from '../../../../shared/reminder-sounds'
 import type {
   AppPreferences,
@@ -12,7 +13,8 @@ import type {
 interface Props {
   reminder?: ReminderWithMeta | null
   prefs: AppPreferences | null
-  onSave: (input: ReminderInput) => void
+  /** Awaited, so the submit button can stay disabled until the write finishes. */
+  onSave: (input: ReminderInput) => void | Promise<void>
   onClose: () => void
 }
 
@@ -97,6 +99,9 @@ export default function ReminderModal({ reminder, prefs, onSave, onClose }: Prop
   const [leadTime, setLeadTime] = useState(String(reminder?.lead_time_min ?? 0))
   const [sound, setSound] = useState(reminder?.sound ?? '')
   const [error, setError] = useState<string | null>(null)
+  // The parent closes this modal only after its save resolves, so without the
+  // guard a double-click on Create made two reminders.
+  const { inFlight: saving, run: runSave } = useInFlight('save reminder')
 
   const toggleWeekday = (day: number): void => {
     setWeekdays((prev) => {
@@ -135,23 +140,26 @@ export default function ReminderModal({ reminder, prefs, onSave, onClose }: Prop
     const parsedInterval = Number(intervalValue)
     const parsedEscalate = Number(escalateAfter)
 
-    onSave({
-      title: title.trim(),
-      body: body.trim() ? body.trim() : null,
-      fire_at: fireAt,
-      freq: freq === '' ? null : freq,
-      interval: Number.isFinite(parsedInterval) && parsedInterval > 0 ? Math.round(parsedInterval) : 1,
-      byweekday: freq === 'weekly' && weekdays.size > 0 ? [...weekdays].sort((a, b) => a - b) : null,
-      lead_time_min: Math.max(0, Number(leadTime) || 0),
-      intensity,
-      escalate_after_min:
-        escalateEnabled && Number.isFinite(parsedEscalate) && parsedEscalate > 0
-          ? Math.round(parsedEscalate)
-          : null,
-      sound: sound || null,
-      entity_type: reminder?.entity_type ?? null,
-      entity_id: reminder?.entity_id ?? null
-    })
+    runSave(() =>
+      onSave({
+        title: title.trim(),
+        body: body.trim() ? body.trim() : null,
+        fire_at: fireAt,
+        freq: freq === '' ? null : freq,
+        interval:
+          Number.isFinite(parsedInterval) && parsedInterval > 0 ? Math.round(parsedInterval) : 1,
+        byweekday: freq === 'weekly' && weekdays.size > 0 ? [...weekdays].sort((a, b) => a - b) : null,
+        lead_time_min: Math.max(0, Number(leadTime) || 0),
+        intensity,
+        escalate_after_min:
+          escalateEnabled && Number.isFinite(parsedEscalate) && parsedEscalate > 0
+            ? Math.round(parsedEscalate)
+            : null,
+        sound: sound || null,
+        entity_type: reminder?.entity_type ?? null,
+        entity_id: reminder?.entity_id ?? null
+      })
+    )
   }
 
   const inputClass =
@@ -351,7 +359,7 @@ export default function ReminderModal({ reminder, prefs, onSave, onClose }: Prop
             </button>
             <button
               type="submit"
-              disabled={!title.trim()}
+              disabled={!title.trim() || saving}
               className="px-3 py-1.5 text-sm rounded-md bg-accent text-white hover:bg-accent-hover disabled:opacity-50 transition-colors"
             >
               {reminder ? 'Save' : 'Create'}
