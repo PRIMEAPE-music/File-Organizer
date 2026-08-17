@@ -1,0 +1,12 @@
+# Binary assets — never apply line-ending conversion to these.
+# Git auto-detects them today, but being explicit means a future asset type
+# can't be silently corrupted by CRLF translation on checkout.
+*.png binary
+*.ico binary
+*.icns binary
+*.svg text eol=lf
+*.wav binary
+*.mp3 binary
+*.woff  binary
+*.woff2 binary
+*.db    binary

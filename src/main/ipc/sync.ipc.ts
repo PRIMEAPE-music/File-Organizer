@@ -1,8 +1,10 @@
 import { ipcMain } from 'electron'
 import { IPC } from '../../shared/ipc-channels'
+import { guardWrite } from '../utils/error-reporter'
 import type { SyncConfig, SyncPreferences } from '../../shared/types'
 import {
   getSyncConfig,
+  getSyncConfigPath,
   setSyncConfig,
   getSyncedPrefs,
   clearSyncedPrefs,
@@ -18,7 +20,11 @@ export function registerSyncHandlers(): void {
   })
 
   ipcMain.handle(IPC.SYNC_SET_CONFIG, (_e, config: SyncConfig): void => {
-    setSyncConfig(config)
+    // The renderer awaits this without a catch, so a raw throw would surface as
+    // an unhandled rejection. Turn it into a visible banner instead.
+    // Full path, like every other guardWrite call site — the banner renders this
+    // as the file's location, so a bare filename would be a lie.
+    guardWrite(getSyncConfigPath(), () => setSyncConfig(config))
   })
 
   ipcMain.handle(IPC.SYNC_SELECT_FOLDER, (): string | null => {
@@ -43,9 +49,25 @@ export function registerSyncHandlers(): void {
     return importData()
   })
 
-  // Sync Now: import if remote is newer, then always export
+  // Sync Now: import if remote is newer, then export — unless the read failed.
   ipcMain.handle(IPC.SYNC_NOW, (_e, prefs: SyncPreferences) => {
     const { result: importResult, preferences } = importData()
+
+    // Never publish over a payload we could not read. Our snapshot is stale
+    // relative to a remote we failed to merge, so exporting would drop whatever
+    // only the remote had — the same write-after-failed-read mistake that
+    // corrupt-read handling exists to prevent, one level up. A *missing* payload
+    // is different: there is nothing to lose, and seeding the share is the
+    // first-run case, so that one falls through to the export below.
+    if (importResult.skipReason === 'unreadable' || importResult.skipReason === 'unreachable') {
+      return {
+        success: false,
+        message: importResult.message,
+        importedNewData: false,
+        preferences: null
+      }
+    }
+
     const exportResult = exportData(prefs)
 
     if (!exportResult.success) {

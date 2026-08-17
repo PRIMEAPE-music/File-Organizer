@@ -22,7 +22,9 @@ import type {
   SyncConfig,
   SyncResult,
   SyncPreferences,
-  SyncNowResult
+  SyncNowResult,
+  AppPreferences,
+  PersistenceIssue
 } from '../shared/types'
 
 const api = {
@@ -182,6 +184,16 @@ const api = {
   syncNow: (prefs: SyncPreferences): Promise<SyncNowResult> =>
     ipcRenderer.invoke(IPC.SYNC_NOW, prefs),
 
+  // ─── App Preferences (tray / autostart) ───
+  getAppPrefs: (): Promise<AppPreferences> =>
+    ipcRenderer.invoke(IPC.APP_PREFS_GET),
+  setAppPrefs: (patch: Partial<AppPreferences>): Promise<AppPreferences> =>
+    ipcRenderer.invoke(IPC.APP_PREFS_SET, patch),
+
+  // ─── Persistence Failures ───
+  getPendingPersistenceIssues: (): Promise<PersistenceIssue[]> =>
+    ipcRenderer.invoke(IPC.PERSISTENCE_GET_PENDING),
+
   // Drag
   startDrag: (filePaths: string[]): void => {
     ipcRenderer.send(IPC.START_DRAG, filePaths)
@@ -220,6 +232,11 @@ const api = {
     const handler = (_e: Electron.IpcRendererEvent, state: WidgetState): void => callback(state)
     ipcRenderer.on(IPC.WIDGET_STATE_CHANGED, handler)
     return () => ipcRenderer.removeListener(IPC.WIDGET_STATE_CHANGED, handler)
+  },
+  onPersistenceIssue: (callback: (issue: PersistenceIssue) => void): (() => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, issue: PersistenceIssue): void => callback(issue)
+    ipcRenderer.on(IPC.PERSISTENCE_ISSUE, handler)
+    return () => ipcRenderer.removeListener(IPC.PERSISTENCE_ISSUE, handler)
   }
 }
 

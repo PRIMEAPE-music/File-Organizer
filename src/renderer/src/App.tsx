@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import type { AppTab, ViewMode, SyncPreferences } from '../../shared/types'
 import { useTheme } from './hooks/useTheme'
 import { useWindowMode } from './hooks/useWindowMode'
+import { usePersistenceIssues } from './hooks/usePersistenceIssues'
 import TabBar from './components/TabBar'
 import GrabTab from './components/GrabTab'
 import FloatingParticles from './components/FloatingParticles'
@@ -9,10 +10,13 @@ import FilesTab from './components/FilesTab'
 import NotesTab from './components/notes/NotesTab'
 import TasksTab from './components/tasks/TasksTab'
 import SyncModal from './components/SyncModal'
+import SettingsModal from './components/SettingsModal'
+import PersistenceBanner from './components/PersistenceBanner'
 
 export default function App() {
   const { theme, toggleTheme } = useTheme()
   const { windowMode, widgetState, isWidget, isExpanded, toggleMode, toggleWidget } = useWindowMode()
+  const { issues, dismiss: dismissIssue } = usePersistenceIssues()
 
   const [activeTab, setActiveTab] = useState<AppTab>(() => {
     return (localStorage.getItem('activeTab') as AppTab) || 'files'
@@ -27,6 +31,7 @@ export default function App() {
   })
 
   const [syncModalOpen, setSyncModalOpen] = useState(false)
+  const [settingsModalOpen, setSettingsModalOpen] = useState(false)
 
   const setViewMode = useCallback((mode: ViewMode) => {
     setViewModeState(mode)
@@ -67,13 +72,20 @@ export default function App() {
     window.location.reload()
   }, [])
 
-  const syncModal = syncModalOpen && (
-    <SyncModal
-      onClose={() => setSyncModalOpen(false)}
-      currentPrefs={currentPrefs}
-      onSyncImport={applyImportedPrefs}
-    />
+  const modals = (
+    <>
+      {syncModalOpen && (
+        <SyncModal
+          onClose={() => setSyncModalOpen(false)}
+          currentPrefs={currentPrefs}
+          onSyncImport={applyImportedPrefs}
+        />
+      )}
+      {settingsModalOpen && <SettingsModal onClose={() => setSettingsModalOpen(false)} />}
+    </>
   )
+
+  const banner = <PersistenceBanner issues={issues} onDismiss={dismissIssue} />
 
   // Widget mode layout
   if (isWidget) {
@@ -92,14 +104,16 @@ export default function App() {
               sidebarCollapsed={sidebarCollapsed}
               onToggleSidebar={toggleSidebar}
               onOpenSync={() => setSyncModalOpen(true)}
+              onOpenSettings={() => setSettingsModalOpen(true)}
             />
+            {banner}
             {activeTab === 'files' && <FilesTab viewMode={viewMode} onSetViewMode={setViewMode} sidebarCollapsed={sidebarCollapsed} />}
             {activeTab === 'notes' && <NotesTab sidebarCollapsed={sidebarCollapsed} />}
             {activeTab === 'tasks' && <TasksTab sidebarCollapsed={sidebarCollapsed} />}
           </div>
         )}
         <GrabTab widgetState={widgetState} onToggle={toggleWidget} />
-        {syncModal}
+        {modals}
       </div>
     )
   }
@@ -118,11 +132,13 @@ export default function App() {
         sidebarCollapsed={sidebarCollapsed}
         onToggleSidebar={toggleSidebar}
         onOpenSync={() => setSyncModalOpen(true)}
+        onOpenSettings={() => setSettingsModalOpen(true)}
       />
+      {banner}
       {activeTab === 'files' && <FilesTab viewMode={viewMode} onSetViewMode={setViewMode} sidebarCollapsed={sidebarCollapsed} />}
       {activeTab === 'notes' && <NotesTab sidebarCollapsed={sidebarCollapsed} />}
       {activeTab === 'tasks' && <TasksTab sidebarCollapsed={sidebarCollapsed} />}
-      {syncModal}
+      {modals}
     </div>
   )
 }

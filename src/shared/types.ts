@@ -223,10 +223,18 @@ export interface SyncConfig {
   autoSync: boolean
 }
 
+/**
+ * Why a sync read declined to proceed. `missing` means the share has no payload
+ * yet (nothing to lose — safe to seed it); the other two mean we could not read
+ * what is there, so writing over it would discard remote-only data.
+ */
+export type SyncSkipReason = 'missing' | 'unreadable' | 'unreachable'
+
 export interface SyncResult {
   success: boolean
   message: string
   exportedAt?: string
+  skipReason?: SyncSkipReason
 }
 
 export interface SyncPreferences {
@@ -242,6 +250,38 @@ export interface SyncNowResult {
   importedNewData: boolean
   preferences: SyncPreferences | null
   exportedAt?: string
+}
+
+// ─── App Preferences (tray / autostart) ───
+
+export interface AppPreferences {
+  /** Closing the window hides to the tray instead of quitting. Default true. */
+  closeToTray: boolean
+  /** Launch at Windows login (hidden, straight to tray). */
+  openAtLogin: boolean
+}
+
+// ─── Persistence Failures (main → renderer) ───
+
+export type PersistenceIssueKind =
+  /** A stored file did not parse. */
+  | 'corrupt'
+  /** A write could not be completed. */
+  | 'write-failed'
+  /** A path could not be reached at all — typically the sync share being offline. */
+  | 'unreachable'
+  /**
+   * A piece of the app could not start (tray icon, global hotkey). `file` holds
+   * a human-readable subject rather than a path.
+   */
+  | 'unavailable'
+
+export interface PersistenceIssue {
+  /** Monotonic id so a queued issue delivered twice collapses in the UI. */
+  id: number
+  kind: PersistenceIssueKind
+  file: string
+  detail: string
 }
 
 // ─── IPC Return Types ───

@@ -9,7 +9,10 @@
     "preview": "electron-vite preview",
     "postinstall": "electron-builder install-app-deps",
     "rebuild": "electron-rebuild -f -w better-sqlite3",
-    "dist": "electron-vite build && electron-builder --win"
+    "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
+    "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
+    "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "dist": "npm run typecheck && electron-vite build && electron-builder --win"
   },
   "build": {
     "appId": "com.fileorganizer.app",

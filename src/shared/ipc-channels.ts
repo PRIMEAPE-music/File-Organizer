@@ -109,9 +109,17 @@ export const IPC = {
   SYNC_IMPORT: 'sync:import',
   SYNC_NOW: 'sync:now',
 
+  // ─── App Preferences (tray / autostart) ───
+  APP_PREFS_GET: 'app-prefs:get',
+  APP_PREFS_SET: 'app-prefs:set',
+
+  // ─── Persistence Failures ───
+  PERSISTENCE_GET_PENDING: 'persistence:get-pending',
+
   // Events (main → renderer)
   FILES_CHANGED: 'event:files-changed',
   SCAN_PROGRESS: 'event:scan-progress',
   WINDOW_MODE_CHANGED: 'event:window-mode-changed',
-  WIDGET_STATE_CHANGED: 'event:widget-state-changed'
+  WIDGET_STATE_CHANGED: 'event:widget-state-changed',
+  PERSISTENCE_ISSUE: 'event:persistence-issue'
 } as const
