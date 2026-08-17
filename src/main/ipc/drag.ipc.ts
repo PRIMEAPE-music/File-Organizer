@@ -15,6 +15,9 @@ export function registerDragHandlers(): void {
       })
     } else if (filePaths.length > 1) {
       event.sender.startDrag({
+        // `file` is a required field on Electron's Item; `files` overrides it
+        // when present, so this is the same drag payload as before.
+        file: filePaths[0],
         files: filePaths,
         icon
       })

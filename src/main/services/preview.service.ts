@@ -3,7 +3,7 @@ import fs from 'fs'
 import type { PreviewData, ExcelSheet } from '../../shared/types'
 import ExcelJS from 'exceljs'
 import mammoth from 'mammoth'
-import pdfParse from 'pdf-parse'
+import { PDFParse } from 'pdf-parse'
 import * as XLSX from 'xlsx'
 
 export async function getPreview(filePath: string): Promise<PreviewData> {
@@ -81,25 +81,28 @@ async function getPdfPreview(filePath: string): Promise<PreviewData> {
   const buffer = fs.readFileSync(filePath)
   const MAX_PAGES = 10
 
-  const data = await pdfParse(buffer, { max: MAX_PAGES })
+  const parser = new PDFParse({ data: new Uint8Array(buffer) })
+  try {
+    // `first: MAX_PAGES` parses pages 1..MAX_PAGES only; `result.total` still
+    // reports the document's full page count.
+    const result = await parser.getText({ first: MAX_PAGES })
 
-  // pdf-parse gives us all text concatenated; split by page via form feed or
-  // fall back to a single "page" with the full text
-  const rawPages = data.text.split(/\f/)
-  const pages = rawPages
-    .slice(0, MAX_PAGES)
-    .map((text, i) => ({ pageNumber: i + 1, text: text.trim() }))
-    .filter(p => p.text.length > 0)
+    const pages = result.pages
+      .map(page => ({ pageNumber: page.num, text: page.text.trim() }))
+      .filter(p => p.text.length > 0)
 
-  // If no pages extracted (empty PDF), return at least a placeholder
-  if (pages.length === 0) {
-    pages.push({ pageNumber: 1, text: '(No text content found)' })
-  }
+    // If no pages extracted (empty PDF), return at least a placeholder
+    if (pages.length === 0) {
+      pages.push({ pageNumber: 1, text: '(No text content found)' })
+    }
 
-  return {
-    type: 'pdf',
-    pages,
-    totalPages: data.numpages
+    return {
+      type: 'pdf',
+      pages,
+      totalPages: result.total
+    }
+  } finally {
+    await parser.destroy()
   }
 }
 

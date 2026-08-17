@@ -1,4 +1,4 @@
-import chokidar from 'chokidar'
+import chokidar, { type FSWatcher } from 'chokidar'
 import path from 'path'
 import { upsertFile, removeFileByPath } from '../db/repositories/files.repo'
 import { getAllFolders } from '../db/repositories/folders.repo'
@@ -6,7 +6,7 @@ import fs from 'fs'
 
 const SUPPORTED_EXTENSIONS = new Set(['.xlsx', '.xls', '.xlsb', '.docx', '.doc', '.pdf', '.txt', '.log', '.md', '.csv', '.json', '.xml'])
 
-let watcher: chokidar.FSWatcher | null = null
+let watcher: FSWatcher | null = null
 let onChange: (() => void) | null = null
 
 // Debounce change notifications to avoid flooding the renderer
@@ -141,7 +141,9 @@ export function startWatching(folderPaths: string[]): void {
     pendingDeletes.set(filePath, timeout)
   })
 
-  watcher.on('error', (error: Error) => {
+  // chokidar v4 types the error payload as `unknown` — it is not guaranteed
+  // to be an Error instance.
+  watcher.on('error', (error: unknown) => {
     console.error('File watcher error:', error)
   })
 }

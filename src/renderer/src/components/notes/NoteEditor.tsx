@@ -27,7 +27,7 @@ export default function NoteEditor({
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'idle'>('idle')
   const [showCategoryMenu, setShowCategoryMenu] = useState(false)
   const [showTagMenu, setShowTagMenu] = useState(false)
-  const saveTimerRef = useRef<ReturnType<typeof setTimeout>>()
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const noteIdRef = useRef<number | null>(null)
   const titleRef = useRef('')
 
