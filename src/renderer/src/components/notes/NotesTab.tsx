@@ -48,7 +48,7 @@ export default function NotesTab({ sidebarCollapsed = false }: NotesTabProps) {
 
   const handleUpdateNote = useCallback(async (id: number, title: string, content: string) => {
     const updated = await updateNote(id, title, content)
-    setSelectedNote(updated)
+    setSelectedNote(prev => prev?.id === id ? updated : prev)
   }, [updateNote])
 
   const handleDeleteNote = useCallback(async (id: number) => {

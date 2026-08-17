@@ -1,4 +1,4 @@
-import { FileText, StickyNote, CheckSquare, Sun, Moon, Minus, Square, X, PanelLeft, PanelLeftClose, PanelLeftOpen } from 'lucide-react'
+import { FileText, StickyNote, CheckSquare, Sun, Moon, Minus, Square, X, PanelLeft, PanelLeftClose, PanelLeftOpen, Wifi } from 'lucide-react'
 import type { AppTab, ThemeMode, WindowMode } from '../../../shared/types'
 
 const tabs: { id: AppTab; label: string; icon: typeof FileText }[] = [
@@ -16,9 +16,10 @@ interface TabBarProps {
   onToggleMode: () => void
   sidebarCollapsed: boolean
   onToggleSidebar: () => void
+  onOpenSync: () => void
 }
 
-export default function TabBar({ activeTab, onSetTab, theme, onToggleTheme, windowMode, onToggleMode, sidebarCollapsed, onToggleSidebar }: TabBarProps) {
+export default function TabBar({ activeTab, onSetTab, theme, onToggleTheme, windowMode, onToggleMode, sidebarCollapsed, onToggleSidebar, onOpenSync }: TabBarProps) {
   return (
     <div className="flex items-center h-11 px-4 border-b border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 shrink-0 drag-region">
       <div className="flex gap-1 no-drag">
@@ -42,6 +43,13 @@ export default function TabBar({ activeTab, onSetTab, theme, onToggleTheme, wind
         })}
       </div>
       <div className="ml-auto flex items-center gap-1 no-drag">
+        <button
+          onClick={onOpenSync}
+          className="p-1.5 rounded-md text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
+          title="LAN Sync settings"
+        >
+          <Wifi size={15} />
+        </button>
         <button
           onClick={onToggleSidebar}
           className="p-1.5 rounded-md text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"

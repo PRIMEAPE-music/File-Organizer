@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import type { AppTab, ViewMode } from '../../shared/types'
+import type { AppTab, ViewMode, SyncPreferences } from '../../shared/types'
 import { useTheme } from './hooks/useTheme'
 import { useWindowMode } from './hooks/useWindowMode'
 import TabBar from './components/TabBar'
@@ -8,6 +8,7 @@ import FloatingParticles from './components/FloatingParticles'
 import FilesTab from './components/FilesTab'
 import NotesTab from './components/notes/NotesTab'
 import TasksTab from './components/tasks/TasksTab'
+import SyncModal from './components/SyncModal'
 
 export default function App() {
   const { theme, toggleTheme } = useTheme()
@@ -24,6 +25,8 @@ export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     return localStorage.getItem('sidebarCollapsed') === 'true'
   })
+
+  const [syncModalOpen, setSyncModalOpen] = useState(false)
 
   const setViewMode = useCallback((mode: ViewMode) => {
     setViewModeState(mode)
@@ -42,6 +45,36 @@ export default function App() {
     localStorage.setItem('activeTab', activeTab)
   }, [activeTab])
 
+  // On startup: apply any synced prefs from auto-import that happened before renderer loaded
+  useEffect(() => {
+    window.api.syncGetSyncedPrefs().then(prefs => {
+      if (prefs) applyImportedPrefs(prefs)
+    })
+  }, [])
+
+  // Keep main process updated with current prefs (used for auto-export on close)
+  const currentPrefs: SyncPreferences = { theme, viewMode, sidebarCollapsed, activeTab }
+  useEffect(() => {
+    window.api.syncUpdatePrefs(currentPrefs)
+  }, [theme, viewMode, sidebarCollapsed, activeTab])
+
+  const applyImportedPrefs = useCallback((prefs: SyncPreferences) => {
+    localStorage.setItem('theme', prefs.theme)
+    localStorage.setItem('viewMode', prefs.viewMode)
+    localStorage.setItem('sidebarCollapsed', String(prefs.sidebarCollapsed))
+    localStorage.setItem('activeTab', prefs.activeTab)
+    // Reload so all state initialises fresh from the updated localStorage
+    window.location.reload()
+  }, [])
+
+  const syncModal = syncModalOpen && (
+    <SyncModal
+      onClose={() => setSyncModalOpen(false)}
+      currentPrefs={currentPrefs}
+      onSyncImport={applyImportedPrefs}
+    />
+  )
+
   // Widget mode layout
   if (isWidget) {
     return (
@@ -58,6 +91,7 @@ export default function App() {
               onToggleMode={toggleMode}
               sidebarCollapsed={sidebarCollapsed}
               onToggleSidebar={toggleSidebar}
+              onOpenSync={() => setSyncModalOpen(true)}
             />
             {activeTab === 'files' && <FilesTab viewMode={viewMode} onSetViewMode={setViewMode} sidebarCollapsed={sidebarCollapsed} />}
             {activeTab === 'notes' && <NotesTab sidebarCollapsed={sidebarCollapsed} />}
@@ -65,6 +99,7 @@ export default function App() {
           </div>
         )}
         <GrabTab widgetState={widgetState} onToggle={toggleWidget} />
+        {syncModal}
       </div>
     )
   }
@@ -82,10 +117,12 @@ export default function App() {
         onToggleMode={toggleMode}
         sidebarCollapsed={sidebarCollapsed}
         onToggleSidebar={toggleSidebar}
+        onOpenSync={() => setSyncModalOpen(true)}
       />
       {activeTab === 'files' && <FilesTab viewMode={viewMode} onSetViewMode={setViewMode} sidebarCollapsed={sidebarCollapsed} />}
       {activeTab === 'notes' && <NotesTab sidebarCollapsed={sidebarCollapsed} />}
       {activeTab === 'tasks' && <TasksTab sidebarCollapsed={sidebarCollapsed} />}
+      {syncModal}
     </div>
   )
 }

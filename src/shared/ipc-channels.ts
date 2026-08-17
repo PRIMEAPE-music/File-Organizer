@@ -99,6 +99,16 @@ export const IPC = {
   // Drag
   START_DRAG: 'drag:start',
 
+  // ─── Sync ───
+  SYNC_GET_CONFIG: 'sync:get-config',
+  SYNC_SET_CONFIG: 'sync:set-config',
+  SYNC_SELECT_FOLDER: 'sync:select-folder',
+  SYNC_UPDATE_PREFS: 'sync:update-prefs',
+  SYNC_GET_SYNCED_PREFS: 'sync:get-synced-prefs',
+  SYNC_EXPORT: 'sync:export',
+  SYNC_IMPORT: 'sync:import',
+  SYNC_NOW: 'sync:now',
+
   // Events (main → renderer)
   FILES_CHANGED: 'event:files-changed',
   SCAN_PROGRESS: 'event:scan-progress',

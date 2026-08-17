@@ -214,6 +214,36 @@ export interface TaskFilterState {
 export type WindowMode = 'normal' | 'widget'
 export type WidgetState = 'collapsed' | 'expanded'
 
+// ─── Sync ───
+
+export interface SyncConfig {
+  enabled: boolean
+  syncPath: string
+  lastSyncedAt: string | null
+  autoSync: boolean
+}
+
+export interface SyncResult {
+  success: boolean
+  message: string
+  exportedAt?: string
+}
+
+export interface SyncPreferences {
+  theme: string
+  viewMode: string
+  sidebarCollapsed: boolean
+  activeTab: string
+}
+
+export interface SyncNowResult {
+  success: boolean
+  message: string
+  importedNewData: boolean
+  preferences: SyncPreferences | null
+  exportedAt?: string
+}
+
 // ─── IPC Return Types ───
 
 export interface FolderScanResult {

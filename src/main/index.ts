@@ -12,6 +12,8 @@ import { registerPreviewHandlers } from './ipc/preview.ipc'
 import { registerNoteHandlers } from './ipc/notes.ipc'
 import { registerTaskHandlers } from './ipc/tasks.ipc'
 import { registerDragHandlers } from './ipc/drag.ipc'
+import { registerSyncHandlers } from './ipc/sync.ipc'
+import { shouldAutoImport, importData, exportData, getCurrentPrefs } from './services/sync.service'
 import { startWatching, stopWatching, setChangeCallback } from './services/watcher.service'
 import { getAllFolders } from './db/repositories/folders.repo'
 import { IPC } from '../shared/ipc-channels'
@@ -265,6 +267,11 @@ function registerGlobalHotkey(): void {
 
 // ─── App lifecycle ───
 
+// Separate dev and prod userData so cache files don't conflict
+if (is.dev) {
+  app.setPath('userData', app.getPath('userData') + '-dev')
+}
+
 app.whenReady().then(() => {
   electronApp.setAppUserModelId('com.fileorganizer')
 
@@ -286,6 +293,12 @@ app.whenReady().then(() => {
   registerTaskHandlers()
   registerWindowHandlers()
   registerDragHandlers()
+  registerSyncHandlers()
+
+  // Auto-import on startup if remote sync file is newer
+  if (shouldAutoImport()) {
+    importData()
+  }
 
   createWindow()
   registerGlobalHotkey()
@@ -309,6 +322,8 @@ app.on('window-all-closed', () => {
   globalShortcut.unregisterAll()
   saveSettings()
   stopWatching()
+  // Auto-export on close if sync is configured
+  exportData(getCurrentPrefs())
   closeDb()
   if (process.platform !== 'darwin') {
     app.quit()

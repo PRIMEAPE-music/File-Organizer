@@ -18,7 +18,11 @@ import type {
   TaskTag,
   TaskStatus,
   WindowMode,
-  WidgetState
+  WidgetState,
+  SyncConfig,
+  SyncResult,
+  SyncPreferences,
+  SyncNowResult
 } from '../shared/types'
 
 const api = {
@@ -159,6 +163,24 @@ const api = {
     ipcRenderer.invoke(IPC.UPDATE_TASK_TAG, id, name, color),
   deleteTaskTag: (id: number): Promise<void> =>
     ipcRenderer.invoke(IPC.DELETE_TASK_TAG, id),
+
+  // ─── Sync ───
+  getSyncConfig: (): Promise<SyncConfig> =>
+    ipcRenderer.invoke(IPC.SYNC_GET_CONFIG),
+  setSyncConfig: (config: SyncConfig): Promise<void> =>
+    ipcRenderer.invoke(IPC.SYNC_SET_CONFIG, config),
+  syncSelectFolder: (): Promise<string | null> =>
+    ipcRenderer.invoke(IPC.SYNC_SELECT_FOLDER),
+  syncUpdatePrefs: (prefs: SyncPreferences): Promise<void> =>
+    ipcRenderer.invoke(IPC.SYNC_UPDATE_PREFS, prefs),
+  syncGetSyncedPrefs: (): Promise<SyncPreferences | null> =>
+    ipcRenderer.invoke(IPC.SYNC_GET_SYNCED_PREFS),
+  syncExport: (prefs: SyncPreferences): Promise<SyncResult> =>
+    ipcRenderer.invoke(IPC.SYNC_EXPORT, prefs),
+  syncImport: (): Promise<{ result: SyncResult; preferences: SyncPreferences | null }> =>
+    ipcRenderer.invoke(IPC.SYNC_IMPORT),
+  syncNow: (prefs: SyncPreferences): Promise<SyncNowResult> =>
+    ipcRenderer.invoke(IPC.SYNC_NOW, prefs),
 
   // Drag
   startDrag: (filePaths: string[]): void => {
