@@ -36,7 +36,9 @@ import type {
  *    `lead_time_min` — not the preference default. "Remind me two days before
  *    this deadline" is a per-reminder decision, and it keeps following the task
  *    when the deadline moves. The pref supplies only the value the row is created
- *    with.
+ *    with. Both of those are stable inputs, and that is what makes the recompute
+ *    idempotent — see the idempotency note on `syncTaskAutoReminder` for the one
+ *    place it is not, and what stops that one re-alerting on every task save.
  *
  *  - ONLY A TIMING EDIT DETACHES: `fire_at`, `freq`, `interval`, `byweekday` —
  *    see `editDetachesFromTask`. Everything else is style or config and keeps the
@@ -95,9 +97,21 @@ export function meetsThreshold(priority: string, threshold: TaskPriority): boole
   return rank(priority) >= rank(threshold)
 }
 
+export interface AutoFireAtPlan {
+  /** The instant the reminder should fire. */
+  at: Date
+  /**
+   * True when `at` came from the near-due clamp — i.e. it is derived from `now`
+   * rather than from the task's due date, and so is a DIFFERENT INSTANT on every
+   * recompute. `syncTaskAutoReminder` is the only thing that needs to know, and it
+   * needs to know because a value that never repeats cannot be reconciled towards.
+   */
+  clamped: boolean
+}
+
 /**
- * The instant an auto reminder for this task should fire, or null if it should
- * not exist: no due date, or a due date already past.
+ * When an auto reminder for this task should fire, or null if it should not exist:
+ * no due date, or a due date already past.
  *
  * `leadMinutes` is the REMINDER'S OWN lead time once the row exists, and the
  * preference default only for a row being created. That is what lets "two days
@@ -106,21 +120,36 @@ export function meetsThreshold(priority: string, threshold: TaskPriority): boole
  * A date-only `due_date` (which is all `<input type="date">` produces) is read as
  * 9am local on that day — see `dueDateToInstant`. Midnight would be a hostile
  * moment to be reminded of anything.
+ *
+ * THE `clamped` FLAG IS NOT DECORATION. Every other output of this function is a
+ * pure function of the task's due date and the reminder's lead time, so recomputing
+ * it converges; the clamp alone is a function of `now`, so recomputing it moves.
+ * Returning that distinction is what lets the caller treat the two cases
+ * differently instead of writing a fresh timestamp on every task save.
  */
+export function planAutoFireAt(
+  dueDate: string | null,
+  leadMinutes: number,
+  nowMs: number = Date.now()
+): AutoFireAtPlan | null {
+  const due = dueDateToInstant(dueDate)
+  if (!due) return null
+  if (due.getTime() <= nowMs) return null
+
+  const ideal = new Date(due.getTime() - Math.max(0, leadMinutes) * 60_000)
+  // The due date is in the future but the lead time overshoots into the past:
+  // fire now-ish rather than never, since the task genuinely is nearly due.
+  if (ideal.getTime() <= nowMs) return { at: new Date(nowMs + 1_000), clamped: true }
+  return { at: ideal, clamped: false }
+}
+
+/** `planAutoFireAt` without the clamp flag, for callers that only want the time. */
 export function computeAutoFireAt(
   dueDate: string | null,
   leadMinutes: number,
   nowMs: number = Date.now()
 ): Date | null {
-  const due = dueDateToInstant(dueDate)
-  if (!due) return null
-  if (due.getTime() <= nowMs) return null
-
-  const fireAt = new Date(due.getTime() - Math.max(0, leadMinutes) * 60_000)
-  // The due date is in the future but the lead time overshoots into the past:
-  // fire now-ish rather than never, since the task genuinely is nearly due.
-  if (fireAt.getTime() <= nowMs) return new Date(nowMs + 1_000)
-  return fireAt
+  return planAutoFireAt(dueDate, leadMinutes, nowMs)?.at ?? null
 }
 
 export interface AutoReminderOutcome {
@@ -134,6 +163,32 @@ export interface AutoReminderOutcome {
  *
  * WHAT THIS WRITES on an existing row: `fire_at` and `enabled`, and nothing else.
  * See the ownership split at the top of this file.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * IT MUST ALSO BE IDEMPOTENT, because it runs on EVERY task save.
+ *
+ * Every input to the target time is stable except one: the near-due clamp resolves
+ * to `now + 1s` (see `planAutoFireAt`). Trusting it unconditionally meant a task
+ * whose lead time already overshoots into the past got a *new* `fire_at` on every
+ * save — and `setAutoReminderFireAt` deletes the pending occurrence and
+ * materialises a fresh one, which the scheduler then delivered. So a 30-day lead on
+ * a task due next week (the modal accepts up to 43200 minutes) popped its alert
+ * every single time the user edited that task, at whatever tier they had chosen,
+ * blackout included. A reconcile that fires an alert is not a reconcile.
+ *
+ * THE RULE: the clamp may move `fire_at` forward only while the reminder has not
+ * yet delivered the firing it is currently holding. Once the user has been told
+ * once for this `fire_at`, telling them again on a task save adds nothing, so the
+ * time stays put — see `repo.hasDeliveredOccurrenceAtOrAfter`.
+ *
+ * WHAT DELIBERATELY STILL HAPPENS:
+ *  - A reminder inside its lead window that has NEVER delivered still fires
+ *    promptly. That is the clamp doing the job it exists for.
+ *  - A due date that moves the ideal time back into the FUTURE still moves
+ *    `fire_at` and schedules a fresh firing, delivered history or not: that value
+ *    is derived from the task, it is stable, and the deadline genuinely changed.
+ *    Only the past-clamped case is sticky.
+ * ─────────────────────────────────────────────────────────────────────────────
  */
 export function syncTaskAutoReminder(
   task: Pick<Task, 'id' | 'title' | 'priority' | 'due_date' | 'status'>,
@@ -155,9 +210,9 @@ export function syncTaskAutoReminder(
   // decision the automation respects rather than overwrites. The pref supplies only
   // the value a brand-new row is created with.
   const leadMinutes = existing ? existing.lead_time_min : prefs.reminderDefaultLeadMin
-  const fireAt = qualifies ? computeAutoFireAt(task.due_date, leadMinutes, nowMs) : null
+  const plan = qualifies ? planAutoFireAt(task.due_date, leadMinutes, nowMs) : null
 
-  if (!fireAt) {
+  if (!plan) {
     // Completed, dropped below the threshold, lost its due date, or the due date has
     // passed. Disable rather than delete: the row (and its `sync_id`) is how the
     // other machine learns to stop firing it too.
@@ -171,7 +226,17 @@ export function syncTaskAutoReminder(
     return { action: dupesRemoved > 0 ? 'updated' : 'none', reminderId: null }
   }
 
-  const targetFireAt = fireAt.toISOString()
+  // THE IDEMPOTENCY GUARD (see the note above). `plan.at` is stable for every case
+  // except the clamp, and the clamp is only allowed to move a reminder that has not
+  // yet said its piece: keeping the existing time means the comparison below writes
+  // nothing, so the pending occurrence survives and no second alert is produced.
+  // Deliberately keyed on the row's CURRENT `fire_at` rather than on "has this
+  // reminder ever fired": a firing delivered for an earlier time says nothing about
+  // the one now scheduled.
+  const targetFireAt =
+    existing && plan.clamped && repo.hasDeliveredOccurrenceAtOrAfter(existing.id, existing.fire_at)
+      ? existing.fire_at
+      : plan.at.toISOString()
 
   if (existing) {
     // THE NARROW WRITE. `fire_at` and `enabled` are the only columns the automation

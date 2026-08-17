@@ -426,6 +426,50 @@ export function setAutoReminderFireAt(id: number, fireAtIso: string): boolean {
 }
 
 /**
+ * Has this reminder ALREADY TOLD THE USER about a firing at or after `fireAtIso`?
+ *
+ * The question the task automation asks before moving `fire_at` forward to "now",
+ * and the reason it can do that at all without re-alerting on every task save. See
+ * the idempotency note on `syncTaskAutoReminder`: the near-due clamp resolves to
+ * `now + 1s`, which is a different instant every time it is computed, so a
+ * recompute that trusted it unconditionally deleted the pending occurrence,
+ * materialised a fresh one, and fired again — for every save of the task.
+ *
+ * "Delivered" is any state the occurrence can only reach by being claimed:
+ *
+ *  - `fired` — on screen or in the Action Center, not yet acknowledged.
+ *  - `acknowledged` — the user dealt with it.
+ *  - `missed` — collapsed into a catch-up digest, which is still a telling.
+ *  - `snoozed` with a snooze count — delivered, then deliberately deferred. Not in
+ *    the three states above only because a snooze clears `fired_at`, and leaving it
+ *    out would mean a task save re-fired the occurrence the user had just pushed to
+ *    later — the same bug wearing a hat, and worse, since moving `fire_at` also
+ *    deletes the snoozed row and loses the deferral.
+ *
+ * `pending` is deliberately absent: nothing has been said yet, so a reminder inside
+ * its lead window that has never delivered still gets its prompt firing.
+ *
+ * String comparison on `fire_at` is exact here, not approximate: every writer
+ * stores `Date.toISOString()`, whose fixed-width UTC form sorts lexicographically
+ * in chronological order — the same property `getDueOccurrences` already relies on.
+ */
+export function hasDeliveredOccurrenceAtOrAfter(reminderId: number, fireAtIso: string): boolean {
+  const row = getDb()
+    .prepare(
+      `SELECT 1 AS hit FROM reminder_occurrences
+       WHERE reminder_id = ?
+         AND fire_at >= ?
+         AND (
+           state IN ('fired', 'acknowledged', 'missed')
+           OR (state = 'snoozed' AND snooze_count > 0)
+         )
+       LIMIT 1`
+    )
+    .get(reminderId, fireAtIso) as { hit: number } | undefined
+  return row !== undefined
+}
+
+/**
  * Hand a detached, task-linked reminder back to the automation — "Reset to
  * automatic" in the Reminders tab.
  *
