@@ -2,6 +2,7 @@
   "name": "file-organizer",
   "version": "1.0.0",
   "description": "Virtual file organization layer for Excel and Word documents",
+  "author": "PRIMEAPE",
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
@@ -25,7 +26,8 @@
       "node_modules/**/*"
     ],
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "icon": "build/icon.ico"
     },
     "nsis": {
       "oneClick": false,
