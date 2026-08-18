@@ -1,6 +1,6 @@
 import * as repo from '../db/repositories/reminders.repo'
 import { getTaskById } from '../db/repositories/tasks.repo'
-import { dueDateToInstant, formatByWeekday } from '../utils/recurrence'
+import { dueDateToInstant, formatByWeekday, parseByWeekday } from '../utils/recurrence'
 import { sanitizeReminderSound } from '../../shared/reminder-sounds'
 import { getAppPrefs } from './app-prefs.service'
 import type {
@@ -687,10 +687,20 @@ export function setTaskManualReminder(
   // Where the switch belongs for an EXPLICIT opt-in: armed for a live task, off for a
   // completed one. Decided here rather than inherited from the row, because this path
   // runs only when the user has just touched the reminder controls in the task modal —
-  // asking for a reminder on an open task is a request to have one. The row this path
-  // writes is always a one-off (`freq: null` below), so the recurrence exemption cannot
-  // apply to it. Nothing else re-asserts this: the status rule acts on crossings only.
-  const shouldBeEnabled = task.status !== 'done'
+  // asking for a reminder on an open task is a request to have one.
+  //
+  // BUT ONLY CREATION AND ADOPTION MAY SET IT. An existing hand-made row has an `enabled`
+  // the user owns, and this path runs on far more than a deliberate tick: the modal
+  // re-sends whenever the reminder's inputs change, which includes the task's due date and
+  // title. Forcing the switch here meant turning a reminder off in the Reminders tab and
+  // then editing that task's due date turned it back on — a state the modal cannot even
+  // display, since it draws the tick from the row existing rather than from `enabled`.
+  //
+  // A completed task still wins: the done rule is not the user's to override. Adoption of
+  // an automatic row arms it, because ticking the box is an explicit request. Crossings of
+  // the done boundary belong to `syncTaskManualReminderStatus`, which acts on transitions.
+  const shouldBeEnabled =
+    task.status === 'done' ? false : manual ? manual.enabled === 1 : true
 
   // Sticky against `manual`, not `existing`: adopting an AUTOMATIC reminder here is
   // the first time this opt-in has been honoured, and it gets its one prompt firing
@@ -709,18 +719,31 @@ export function setTaskManualReminder(
   const fireAt =
     manual && !shouldBeEnabled && plan.clamped ? manual.fire_at : stickyFireAt(manual, plan)
 
+  // THE SAME "USER OWNS *HOW*" NARROWING THE AUTOMATION ALREADY HAS. On an existing row
+  // this path owns the timing it derives — `lead_time_min` and `fire_at` — and nothing
+  // else. Carrying the row's own tier, escalation, sound, body and title through means the
+  // comparison below sees them unchanged, so they are neither reverted nor a reason to
+  // write. Preference defaults are a CREATION concern only. Before this, a tier the user
+  // chose was "a change", got rewritten on the next task save, and (until `updateReminder`
+  // learned to spare an unchanged schedule) took the snooze with it.
+  //
+  // Recurrence carries through for the same reason, and it matters more than it looks:
+  // forcing `freq: null` would quietly demote a repeating reminder built in the Reminders
+  // tab to a one-off — and a one-off is precisely what the done rule disables, so it would
+  // also defeat the recurring exemption. That is why the comment above no longer claims
+  // this path only ever writes one-offs.
   const prefs = getAppPrefs()
   const input: ReminderInput = {
-    title: `Task due: ${task.title}`,
-    body: null,
+    title: existing ? existing.title : `Task due: ${task.title}`,
+    body: existing ? existing.body : null,
     fire_at: fireAt,
-    freq: null,
-    interval: 1,
-    byweekday: null,
+    freq: existing ? existing.freq : null,
+    interval: existing ? existing.interval : 1,
+    byweekday: existing ? parseByWeekday(existing.byweekday) : null,
     lead_time_min: lead,
-    intensity: prefs.reminderDefaultIntensity,
-    escalate_after_min: prefs.reminderDefaultEscalateMin,
-    sound: null,
+    intensity: existing ? existing.intensity : prefs.reminderDefaultIntensity,
+    escalate_after_min: existing ? existing.escalate_after_min : prefs.reminderDefaultEscalateMin,
+    sound: existing ? existing.sound : null,
     entity_type: 'task',
     entity_id: task.id
   }

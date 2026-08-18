@@ -314,6 +314,21 @@ export function updateReminder(
   const current = getRawReminder(id)
   if (!current) return undefined
 
+  // Only the SCHEDULE columns justify tearing the occurrences down. A change confined to
+  // tier, escalation, sound, body or title leaves every firing exactly where it was —
+  // including a snoozed one. Deleting unconditionally meant that changing a tier, or just
+  // opening the modal and pressing Save, silently discarded a snooze; and when `fire_at`
+  // was already past, re-materialisation then produced nothing at all, so the deferred
+  // reminder never came back. Coerced the same way the UPDATE below coerces them, so a
+  // value the write would have normalised is not mistaken for a change.
+  const nextInterval = Number.isInteger(input.interval) && input.interval > 0 ? input.interval : 1
+  const nextByWeekday = formatByWeekday(input.byweekday)
+  const scheduleChanged =
+    current.fire_at !== input.fire_at ||
+    current.freq !== (input.freq ?? null) ||
+    current.interval !== nextInterval ||
+    current.byweekday !== nextByWeekday
+
   const apply = db.transaction(() => {
     db.prepare(
       `UPDATE reminders SET
@@ -337,12 +352,16 @@ export function updateReminder(
       opts.takeOwnership ? 0 : current.auto_created,
       id
     )
-    db.prepare(
-      "DELETE FROM reminder_occurrences WHERE reminder_id = ? AND state IN ('pending', 'snoozed')"
-    ).run(id)
+    if (scheduleChanged) {
+      db.prepare(
+        "DELETE FROM reminder_occurrences WHERE reminder_id = ? AND state IN ('pending', 'snoozed')"
+      ).run(id)
+    }
   })
   apply()
 
+  // Safe to call either way: INSERT OR IGNORE against UNIQUE(reminder_id, fire_at), so an
+  // unchanged schedule only tops the horizon up and touches nothing that already exists.
   materialiseOccurrences(id)
   return getReminderById(id)
 }
