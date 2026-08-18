@@ -58,6 +58,28 @@ export function getTaskById(id: number): TaskWithMeta | undefined {
   return task ? enrichTask(task) : undefined
 }
 
+/**
+ * Just the status column, read BEFORE a write that may change it.
+ *
+ * The reminder reconcile needs to know whether a save crossed the done boundary, not
+ * merely where the task landed: only a crossing is the task saying something new about
+ * whether it should still remind, and a save that leaves the status alone must leave
+ * the user's own on/off choice alone with it. See `syncTaskManualReminderStatus`.
+ *
+ * Deliberately not `getTaskById`, which enriches with a category lookup and a tag
+ * join — this runs on every task save and every kanban drag, and one indexed
+ * primary-key read of one column is all the comparison needs.
+ *
+ * `null` means the row is not there, which the caller reads as "no previous status to
+ * compare against" rather than as any particular status.
+ */
+export function getTaskStatus(id: number): TaskStatus | null {
+  const row = getDb().prepare('SELECT status FROM tasks WHERE id = ?').get(id) as
+    | { status: TaskStatus }
+    | undefined
+  return row?.status ?? null
+}
+
 export function createTask(data: {
   title: string
   description?: string

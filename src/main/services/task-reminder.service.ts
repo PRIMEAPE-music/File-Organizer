@@ -9,7 +9,8 @@ import type {
   ReminderResetResult,
   ReminderWithMeta,
   Task,
-  TaskPriority
+  TaskPriority,
+  TaskStatus
 } from '../../shared/types'
 
 /**
@@ -462,6 +463,135 @@ export function removeTaskAutoReminder(taskId: number): number {
 }
 
 /**
+ * A COMPLETED TASK STOPS REMINDING — including through the reminder the user made
+ * by hand. UNLESS THAT REMINDER REPEATS.
+ *
+ * The automation already refuses to keep an `auto_created = 1` reminder alive for a
+ * done task (see `qualifies` in `syncTaskAutoReminder`), but the hand-made row was
+ * exempt from every status rule, so ticking "Remind me" on a task and then finishing
+ * the task left a reminder that went on firing — at whatever tier the user had
+ * chosen, blackout included.
+ *
+ * WHAT IS AND IS NOT TOUCHED:
+ *
+ *  - `auto_created = 0` + `entity_type = 'task'` + `freq IS NULL` — the one-off
+ *    hand-made reminder for this task, and only its `enabled` column, and only when
+ *    the task's status CROSSES the done boundary. See the transition note below.
+ *  - `freq` NON-NULL IS LEFT COMPLETELY ALONE, whatever the status. A repeating
+ *    reminder is not about one deadline — "water the plants every Tuesday", filed
+ *    against a task, must not be killed because the task was ticked once. There is
+ *    no coherent "done" for a recurrence, so this declines to invent one.
+ *  - A standalone reminder (no entity) and a note-linked one are out of reach by
+ *    construction: `findManualReminderForEntity` matches `entity_type = 'task'` with
+ *    this task's id.
+ *
+ * DISABLED IN PLACE, NEVER DELETED — the same decision, for the same reason, as the
+ * automation's demotion: the row and its `sync_id` are how the OTHER machine learns
+ * to stop firing it too, whereas a delete does not travel at all (the importer never
+ * removes local-only rows). See the ONE REMINDER PER TASK note at the top.
+ *
+ * REOPENING RE-ARMS IT, mirroring `syncTaskAutoReminder`. `setReminderEnabled(id,
+ * true)` re-materialises from the row's existing `fire_at`, and materialisation never
+ * creates a pending occurrence in the past (BACKFILL_DAYS = 0) and never re-inserts
+ * one that already exists (`INSERT OR IGNORE` on `UNIQUE(reminder_id, fire_at)`), so
+ * a reminder whose moment has passed comes back switched on and silent rather than
+ * replaying what it already delivered.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * A TRANSITION, NOT A STATE THIS REPAIRS. `previousStatus` is what makes that
+ * possible, and it is the whole reason this function takes a second argument.
+ *
+ * The first version of this rule asserted the state `enabled == (status !== 'done')`
+ * on every save, and that quietly reversed the user's own off switch: switch a
+ * non-recurring task reminder off in the Reminders tab, save the still-open task for
+ * any unrelated reason — a typo in the description — and it came back on. The
+ * Reminders tab's switch is the most explicit statement a user can make about a
+ * reminder, and a task save is not a statement about it at all. That is the same
+ * principle 94c39d1 established for the style fields: the task owns *when*, the user
+ * owns *how*, and neither may silently undo the other.
+ *
+ * So the rule only fires on a CROSSING of the done boundary:
+ *
+ *  - open → done  disables. The task just stopped needing to be reminded about.
+ *  - done → open  re-enables. It needs reminding about again.
+ *  - anything else — todo → in_progress, done → done, a description edit — DOES
+ *    NOTHING AT ALL, not even a lookup. `enabled` is left exactly as the user left it.
+ *
+ * The re-enable on `done → open` can overwrite an off switch set before the task was
+ * ever completed. That is intended and not the same defect: reopening a finished task
+ * is a fresh statement that it is live again, and the alternative — a reopened task
+ * whose reminder stays silent with nothing on screen saying why — is worse.
+ *
+ * `previousStatus === null` means there is nothing to compare against: the task was
+ * just created, or the row could not be read. Treated as "no crossing", so a create
+ * never flips a switch. A brand-new task has no reminder to flip anyway, and the
+ * one case that genuinely matters — ticking "Remind me" on a task that is already
+ * done — is settled where it happens, in `setTaskManualReminder`.
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * IDEMPOTENT, because this runs on EVERY task save and every kanban drag — the same
+ * requirement, and the same failure mode, as the two paths above. There are two
+ * fences, and the outer one is now the transition test: a save that does not move the
+ * status returns before touching the database, so ten saves of a done task perform ten
+ * reads of one status column and no writes. The inner fence is the state check on
+ * `enabled`, which covers a crossing whose work is already done (a reminder the user
+ * had already switched off before finishing the task). Both existing
+ * `setReminderEnabled` calls in this file are fenced the same way; an unfenced one
+ * would also delete and re-derive occurrences on every save, which is the
+ * snooze-cancelling bug wearing a third hat.
+ *
+ * The disabling write itself does drop this reminder's pending and snoozed
+ * occurrences — `setReminderEnabled` does that deliberately, so that switching a
+ * reminder off means "stop bothering me" rather than "queue it up". Marking a task
+ * done therefore forgets a deferral the user had set on that task's reminder, exactly
+ * as the automation's demotion and the Reminders tab's own off switch already do.
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * WHY HERE AND NOT IN `setTaskManualReminder`: that function only runs when the
+ * reminder controls in the task modal actually changed (`remindChanged`), so a save
+ * that only ticks the task off as done never reaches it. This runs beside
+ * `syncTaskAutoReminder` on every path that writes a task's status — the modal save,
+ * and the kanban drag (`IPC.REORDER_TASK`), which is how a task is most often
+ * finished and which used to bypass both rules entirely.
+ *
+ * @param previousStatus the task's status BEFORE the write that just happened, read by
+ *   the caller from the row it is about to change. `null` when there is no previous
+ *   status to compare (a create), which means no crossing and therefore no action.
+ */
+export function syncTaskManualReminderStatus(
+  task: Pick<Task, 'id' | 'status'>,
+  previousStatus: TaskStatus | null
+): AutoReminderOutcome {
+  // THE OUTER FENCE, and the fix for the reversed off switch: no crossing of the done
+  // boundary means this rule has nothing to say, so it does not even look the reminder
+  // up. `null` (a create) is deliberately not a crossing — see the note above.
+  const isDone = task.status === 'done'
+  if (previousStatus === null || (previousStatus === 'done') === isDone) {
+    return { action: 'none', reminderId: null }
+  }
+
+  const manual = repo.findManualReminderForEntity('task', task.id)
+  if (!manual) return { action: 'none', reminderId: null }
+  // A recurrence outlives the task's completion. Nothing to decide.
+  if (manual.freq !== null) return { action: 'none', reminderId: manual.id }
+
+  const shouldBeEnabled = !isDone
+  // THE INNER FENCE. The crossing happened, but the switch is already where the
+  // crossing wants it — the user had switched this reminder off themselves before
+  // finishing the task. No UPDATE, no occurrence deletion, no `updated_at` bump.
+  if (manual.enabled === (shouldBeEnabled ? 1 : 0)) {
+    return { action: 'none', reminderId: manual.id }
+  }
+
+  repo.setReminderEnabled(manual.id, shouldBeEnabled)
+  // 'removed' is the automation's word for disabled-in-place — see the `!plan` branch
+  // of `syncTaskAutoReminder`. Kept identical so the caller's one test
+  // (`action !== 'none'` → reschedule) reads the same for both paths.
+  return { action: shouldBeEnabled ? 'updated' : 'removed', reminderId: manual.id }
+}
+
+/**
  * A task's own opt-in reminder ("Remind me" in the task modal), which is always
  * `auto_created = 0` so the priority automation will never touch it.
  *
@@ -498,10 +628,28 @@ export function removeTaskAutoReminder(taskId: number): number {
  * judgement, and the stickiness is what makes honouring it survivable.
  * ─────────────────────────────────────────────────────────────────────────────
  *
+ * A DONE TASK IS THE ONE EXCEPTION, and it is about `enabled` only. The row is still
+ * created or adopted with the timing the user just asked for — the tick is not
+ * refused, and it is still there, ticked, with its lead time, when they reopen the
+ * modal — but it is left SWITCHED OFF, because a completed task does not remind.
+ *
+ * THIS CLAUSE IS THE ONLY THING THAT ESTABLISHES THAT STATE, which is why it matters
+ * more than it looks. `syncTaskManualReminderStatus` acts only when a save CROSSES the
+ * done boundary, and ticking "Remind me" on a task that was already done crosses
+ * nothing — so nothing would ever come back to switch this row off. (The first version
+ * of that rule re-asserted the state on every save and would have cleaned up after an
+ * omission here; it also reversed the user's own off switch, which is why it no longer
+ * does either.) The ordering makes the same point: the task modal saves the task FIRST
+ * and calls this second (see TasksTab), so the status rule has already run and found no
+ * crossing by the time the opt-in arrives.
+ *
+ * Reopening the task arms it, through the same crossing that arms it for every other
+ * reopened task.
+ *
  * @param enabled false removes the manual reminder (and only the manual one).
  */
 export function setTaskManualReminder(
-  task: Pick<Task, 'id' | 'title' | 'due_date'>,
+  task: Pick<Task, 'id' | 'title' | 'due_date' | 'status'>,
   enabled: boolean,
   leadMinutes: number,
   nowMs: number = Date.now()
@@ -536,12 +684,30 @@ export function setTaskManualReminder(
   // clamp, and of the `clamped` flag the stickiness depends on.
   const plan = planAutoFireAt(task.due_date, lead, nowMs) ?? clampToNow(nowMs)
 
+  // Where the switch belongs for an EXPLICIT opt-in: armed for a live task, off for a
+  // completed one. Decided here rather than inherited from the row, because this path
+  // runs only when the user has just touched the reminder controls in the task modal —
+  // asking for a reminder on an open task is a request to have one. The row this path
+  // writes is always a one-off (`freq: null` below), so the recurrence exemption cannot
+  // apply to it. Nothing else re-asserts this: the status rule acts on crossings only.
+  const shouldBeEnabled = task.status !== 'done'
+
   // Sticky against `manual`, not `existing`: adopting an AUTOMATIC reminder here is
   // the first time this opt-in has been honoured, and it gets its one prompt firing
   // even though the automation's own earlier firings are in that row's history. From
   // then on the row IS the manual reminder, and every later save of the task finds
   // its firing delivered and leaves `fire_at` alone.
-  const fireAt = stickyFireAt(manual, plan)
+  //
+  // STICKIER STILL FOR A ROW THAT IS GOING TO STAY SWITCHED OFF. `stickyFireAt`'s rule
+  // is that the clamp may only move a firing the user has not been told about yet; a
+  // reminder on a completed task cannot deliver the firing it is holding at all, so
+  // moving it is pure churn — and `hasDeliveredOccurrenceAtOrAfter` would never say
+  // otherwise for a row that has been off since it was created, which made re-ticking
+  // "Remind me" on a done task rewrite it every single time. The unclamped case needs
+  // no exception: `plan.at` is then a stable function of the due date and the lead
+  // time, so writing it converges, and it is the timing a reopen will arm.
+  const fireAt =
+    manual && !shouldBeEnabled && plan.clamped ? manual.fire_at : stickyFireAt(manual, plan)
 
   const prefs = getAppPrefs()
   const input: ReminderInput = {
@@ -564,16 +730,23 @@ export function setTaskManualReminder(
     // no `updated_at` bump, so a snooze on this reminder survives the task being
     // saved. This lives in main rather than in the renderer on purpose: the renderer
     // declining to call is defence in depth, this is the guarantee.
-    if (!wouldChangeManualReminder(existing, input)) {
+    if (!wouldChangeManualReminder(existing, input, shouldBeEnabled)) {
       return { ok: true, reminderId: existing.id }
     }
     // takeOwnership: for the hand-made row this is already true and costs nothing;
     // for an adopted automatic one it is the point of the call.
     repo.updateReminder(existing.id, input, { takeOwnership: true })
-    if (!existing.enabled) repo.setReminderEnabled(existing.id, true)
+    // Fenced on the current state, as everywhere else in this file: `updateReminder`
+    // does not touch `enabled`, so this writes only when the switch really has to move.
+    if (existing.enabled !== (shouldBeEnabled ? 1 : 0)) {
+      repo.setReminderEnabled(existing.id, shouldBeEnabled)
+    }
     return { ok: true, reminderId: existing.id }
   }
   const created = repo.createReminder(input, { autoCreated: false })
+  // `createReminder` always inserts `enabled = 1`. For a task already done, switch the
+  // new row off immediately — same process tick, so the scheduler never sees it armed.
+  if (!shouldBeEnabled) repo.setReminderEnabled(created.id, false)
   return { ok: true, reminderId: created.id }
 }
 
@@ -587,19 +760,27 @@ export function setTaskManualReminder(
  *
  * COUPLED, ON PURPOSE, TO `updateReminder`'s COLUMN LIST. Every column that UPDATE
  * names is compared here, plus the two the caller controls around it: `auto_created`,
- * which `takeOwnership` forces to 0, and `enabled`, which the caller re-arms
- * separately — so a disabled row must never be reported as up to date. A column added
- * to the write and not to this comparison would make a real edit vanish, which is why
- * the two lists are worth reading side by side.
+ * which `takeOwnership` forces to 0, and `enabled`, which the caller moves
+ * separately — so a row on the wrong side of the switch must never be reported as up
+ * to date. A column added to the write and not to this comparison would make a real
+ * edit vanish, which is why the two lists are worth reading side by side.
+ *
+ * `targetEnabled` is the caller's decision about the switch, not a constant: an opt-in
+ * on a task that is already done wants the row present and OFF, and comparing against
+ * a hardcoded `1` would report that row as needing a write on every single save.
  *
  * The coercions are the write path's own helpers rather than re-implementations, the
  * same reasoning as `editDetachesFromTask`. `interval` and `lead_time_min` need none:
  * the caller builds them already in stored form.
  */
-function wouldChangeManualReminder(current: Reminder, input: ReminderInput): boolean {
+function wouldChangeManualReminder(
+  current: Reminder,
+  input: ReminderInput,
+  targetEnabled: boolean
+): boolean {
   return !(
     current.auto_created === 0 &&
-    current.enabled === 1 &&
+    current.enabled === (targetEnabled ? 1 : 0) &&
     current.title === input.title &&
     current.body === (input.body ?? null) &&
     current.entity_type === (input.entity_type ?? null) &&
